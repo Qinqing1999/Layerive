@@ -314,13 +314,19 @@ function isSenseNovaImageModel(model) {
   return model.provider === 'sensenova' || /(?:^|[/.])sensenova\.cn(?:[/:]|$)/i.test(normalizeBaseUrl(model.baseUrl));
 }
 
+function isAgnesImageModel(model) {
+  return model.provider === 'agnes' || /(?:^|\.)agnes-ai\.com$/i.test(new URL(normalizeBaseUrl(model.baseUrl)).hostname);
+}
+
 async function callOpenAi(model, prompt, params, inputImage, signal) {
   const count = requestedImageCount(params);
   const size = params.size || '1024x1024';
-  const endpoint = inputImage ? 'images/edits' : 'images/generations';
+  const isSenseNova = isSenseNovaImageModel(model);
+  const isAgnes = isAgnesImageModel(model);
+  // Agnes i2i uses /images/generations with an image param, not /images/edits.
+  const endpoint = inputImage && !isAgnes ? 'images/edits' : 'images/generations';
   const headers = { Authorization: `Bearer ${model.apiKey}` };
   let requestBody;
-  const isSenseNova = isSenseNovaImageModel(model);
   // OpenAI-only knobs: output format (png/jpeg/webp) and transparent background.
   // Transparent backgrounds require a lossless format, so jpeg forces opaque.
   const outputFormat = ['png', 'jpeg', 'webp'].includes(String(params.outputFormat)) ? String(params.outputFormat) : 'png';
@@ -331,6 +337,14 @@ async function callOpenAi(model, prompt, params, inputImage, signal) {
     const encoded = normalized.buffer.toString('base64');
     headers['Content-Type'] = 'application/json';
     requestBody = JSON.stringify({ model: model.model, prompt, n: 1, size: 'auto', images: [{ image_url: `data:${normalized.mime_type};base64,${encoded}` }], response_format: 'b64_json', output_format: 'png', prompt_extend: true, watermark: false });
+  } else if (inputImage && isAgnes) {
+    // Agnes i2i routes through /images/generations (not /images/edits) with an
+    // `image` array; it does not support n>1, base64 output, output_format, or
+    // background. We fetch the returned URL to get bytes.
+    const absolute = path.join(PROJECTS_ROOT, inputImage.project_id, inputImage.file_path);
+    const encoded = (await readFile(absolute)).toString('base64');
+    headers['Content-Type'] = 'application/json';
+    requestBody = JSON.stringify({ model: model.model, prompt, size, image: [`data:${inputImage.mime_type};base64,${encoded}`] });
   } else if (inputImage) {
     const absolute = path.join(PROJECTS_ROOT, inputImage.project_id, inputImage.file_path);
     const form = new FormData();
@@ -347,6 +361,11 @@ async function callOpenAi(model, prompt, params, inputImage, signal) {
     // SenseNova exposes no-watermark output explicitly. It also supports one
     // image per request for this model, regardless of the workspace count.
     requestBody = JSON.stringify({ model: model.model, prompt, n: 1, size, watermark: false, response_format: 'b64_json', output_format: 'png', prompt_extend: true });
+  } else if (isAgnes) {
+    // Agnes T2I: does not support n>1, quality, output_format, or background.
+    // Use return_base64 instead of response_format for base64 output.
+    headers['Content-Type'] = 'application/json';
+    requestBody = JSON.stringify({ model: model.model, prompt, n: 1, size, return_base64: true });
   } else {
     headers['Content-Type'] = 'application/json';
     requestBody = JSON.stringify({ model: model.model, prompt, n: count, size, quality: normalizeImageQuality(params.quality), response_format: 'b64_json', output_format: outputFormat, background });
@@ -527,7 +546,7 @@ async function mapWithConcurrency(items, limit, worker) {
 // per image. Partial failures keep whatever came back, as before.
 async function callImageProviderBatch(model, prompts, params, inputImage, signal) {
   const distinctPrompts = prompts.length > 1;
-  const nativeBatch = !distinctPrompts && model.provider !== 'gemini' && !isSenseNovaImageModel(model);
+  const nativeBatch = !distinctPrompts && model.provider !== 'gemini' && !isSenseNovaImageModel(model) && !isAgnesImageModel(model);
   const requestPrompts = nativeBatch
     ? [prompts[0]]
     : distinctPrompts ? prompts : Array.from({ length: requestedImageCount(params) }, () => prompts[0]);

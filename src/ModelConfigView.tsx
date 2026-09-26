@@ -21,12 +21,14 @@ const senseNovaVisionUrl = 'https://api.sensenova.cn/v1';
 const openAiUrl = 'https://api.openai.com/v1';
 const geminiUrl = 'https://generativelanguage.googleapis.com/v1beta';
 const grokUrl = 'https://api.x.ai/v1';
+const agnesUrl = 'https://apihub.agnes-ai.com/v1';
 const defaultVisionApiFormat: NonNullable<ModelConfig['apiFormat']> = 'chat_completions';
 
 function providerBaseUrl(type: ModelConfig['type'], provider: ModelConfig['provider']) {
   if (provider === 'sensenova') return type === 'vision' ? senseNovaVisionUrl : senseNovaUrl;
   if (provider === 'gemini') return geminiUrl;
   if (provider === 'grok') return grokUrl;
+  if (provider === 'agnes') return agnesUrl;
   return openAiUrl;
 }
 
@@ -41,6 +43,7 @@ function defaultModel(type: ModelConfig['type'], provider: ModelConfig['provider
   if (provider === 'sensenova') return 'sensenova-u1.5-lite';
   if (provider === 'gemini') return 'gemini-3.1-flash-image';
   if (provider === 'grok') return 'grok-imagine-image-2.0';
+  if (provider === 'agnes') return 'agnes-image-2.0-flash';
   return 'gpt-image-2';
 }
 
@@ -58,6 +61,7 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
   const isSenseNova = form.provider === 'sensenova';
   const isGemini = form.provider === 'gemini';
   const isGrok = form.provider === 'grok';
+  const isAgnes = form.provider === 'agnes';
 
   useEffect(() => {
     if (creating) return;
@@ -105,7 +109,7 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
     const typeLabel = model.type === 'vision' ? '视觉识别' : '图片生成';
     const visionFormatLabel = model.apiFormat === 'anthropic_messages' ? 'A' : model.apiFormat === 'responses' ? 'R' : 'C';
     return <button key={model.id} className={`model-list-item ${selectedId === model.id ? 'active' : ''}`} onClick={() => choose(model.id)}>
-      <span className={`model-provider ${model.type === 'vision' ? 'vision-api' : model.provider}`}>{model.type === 'vision' ? visionFormatLabel : model.provider === 'sensenova' ? '日' : model.provider === 'gemini' ? 'Gm' : model.provider === 'grok' ? 'Gr' : 'O'}</span>
+      <span className={`model-provider ${model.type === 'vision' ? 'vision-api' : model.provider}`}>{model.type === 'vision' ? visionFormatLabel : model.provider === 'sensenova' ? '日' : model.provider === 'gemini' ? 'Gm' : model.provider === 'grok' ? 'Gr' : model.provider === 'agnes' ? 'Ag' : 'O'}</span>
       <span className="model-label"><strong>{model.name}</strong><small>{typeLabel} · {model.model}</small></span>
       {model.type !== 'vision' && activeModel === model.id && <span className="default-tag">默认</span>}
       {model.type === 'vision' && activeVisionModel === model.id && <span className="default-tag">识别默认</span>}
@@ -139,13 +143,13 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
           </div>
           {form.type === 'vision'
             ? <label className="field"><span>API 格式</span><select value={form.apiFormat || defaultVisionApiFormat} onChange={(event) => update('apiFormat', event.target.value as NonNullable<ModelConfig['apiFormat']>)}><option value="anthropic_messages">Anthropic Messages (/v1/messages)</option><option value="chat_completions">Chat Completions (/chat/completions)</option><option value="responses">Responses (/responses)</option></select></label>
-            : <label className="field"><span>提供商</span><select value={form.provider} onChange={(event) => changeProvider(event.target.value as ModelConfig['provider'])}><option value="sensenova">日日新</option><option value="openai">OpenAI</option><option value="gemini">Gemini · Nano Banana</option><option value="grok">Grok · Imagine</option></select></label>}
+            : <label className="field"><span>提供商</span><select value={form.provider} onChange={(event) => changeProvider(event.target.value as ModelConfig['provider'])}><option value="sensenova">日日新</option><option value="openai">OpenAI</option><option value="gemini">Gemini · Nano Banana</option><option value="grok">Grok · Imagine</option><option value="agnes">Agnes</option></select></label>}
 
-          {form.type === 'vision' ? <div className="provider-guide"><strong>视觉接口配置</strong><p>请选择服务支持的请求格式；Base URL 填写服务根地址，系统会自动拼接所选接口路径。旧配置会沿用原请求格式。</p></div> : isSenseNova ? <div className="provider-guide sensenova-guide"><strong>日日新配置</strong><p>使用日日新官方图片接口。图片生成会固定启用无水印参数，并按接口限制每次生成 1 张。</p></div> : isGemini ? <div className="provider-guide gemini-guide"><strong>Gemini Nano Banana 配置</strong><p>使用 Gemini 原生图片接口和 Google API Key，支持文生图、参考图改图与文字编辑。默认模型为 gemini-3.1-flash-image；也可填写 gemini-2.5-flash-image 或其他 Nano Banana 模型。</p></div> : isGrok ? <div className="provider-guide grok-guide"><strong>Grok Imagine 配置</strong><p>使用 xAI 图片生成与编辑接口，支持文生图、图生图和提示词改图。建议模型填写 grok-imagine-image-2.0。</p></div> : <div className="provider-guide"><strong>OpenAI 配置</strong><p>适用于 OpenAI 官方接口和 OpenAI 兼容中转站；请填写服务根地址，不要包含具体接口路径。</p></div>}
+          {form.type === 'vision' ? <div className="provider-guide"><strong>视觉接口配置</strong><p>请选择服务支持的请求格式；Base URL 填写服务根地址，系统会自动拼接所选接口路径。旧配置会沿用原请求格式。</p></div> : isSenseNova ? <div className="provider-guide sensenova-guide"><strong>日日新配置</strong><p>使用日日新官方图片接口。图片生成会固定启用无水印参数，并按接口限制每次生成 1 张。</p></div> : isGemini ? <div className="provider-guide gemini-guide"><strong>Gemini Nano Banana 配置</strong><p>使用 Gemini 原生图片接口和 Google API Key，支持文生图、参考图改图与文字编辑。默认模型为 gemini-3.1-flash-image；也可填写 gemini-2.5-flash-image 或其他 Nano Banana 模型。</p></div> : isGrok ? <div className="provider-guide grok-guide"><strong>Grok Imagine 配置</strong><p>使用 xAI 图片生成与编辑接口，支持文生图、图生图和提示词改图。建议模型填写 grok-imagine-image-2.0。</p></div> : isAgnes ? <div className="provider-guide agnes-guide"><strong>Agnes 配置</strong><p>使用 Agnes AI 图片接口，支持文生图和图生图（走 /images/generations + image 参数）。每次仅生成 1 张，不支持质量、输出格式和透明背景参数。建议模型填写 agnes-image-2.0-flash。</p></div> : <div className="provider-guide"><strong>OpenAI 配置</strong><p>适用于 OpenAI 官方接口和 OpenAI 兼容中转站；请填写服务根地址，不要包含具体接口路径。</p></div>}
 
-          <label className="field"><span>{form.type === 'vision' ? 'API Base URL' : isSenseNova ? '日日新服务地址' : isGemini ? 'Gemini API Base URL' : isGrok ? 'xAI API Base URL' : 'API Base URL'}</span><input disabled={form.type === 'image' && isSenseNova} value={form.baseUrl} onChange={(event) => update('baseUrl', event.target.value)} placeholder={providerBaseUrl(form.type, form.provider)} /><small className="field-help">{form.type === 'vision' ? '填写服务根地址；也兼容直接填写完整接口地址。' : isSenseNova ? `固定使用 ${providerBaseUrl(form.type, form.provider)}。` : isGemini ? '官方地址为 https://generativelanguage.googleapis.com/v1beta。' : isGrok ? '官方地址为 https://api.x.ai/v1。' : '例如 https://api.openai.com/v1 或中转站提供的 /v1 根地址。'}</small></label>
+          <label className="field"><span>{form.type === 'vision' ? 'API Base URL' : isSenseNova ? '日日新服务地址' : isGemini ? 'Gemini API Base URL' : isGrok ? 'xAI API Base URL' : isAgnes ? 'Agnes API Base URL' : 'API Base URL'}</span><input disabled={form.type === 'image' && isSenseNova} value={form.baseUrl} onChange={(event) => update('baseUrl', event.target.value)} placeholder={providerBaseUrl(form.type, form.provider)} /><small className="field-help">{form.type === 'vision' ? '填写服务根地址；也兼容直接填写完整接口地址。' : isSenseNova ? `固定使用 ${providerBaseUrl(form.type, form.provider)}。` : isGemini ? '官方地址为 https://generativelanguage.googleapis.com/v1beta。' : isGrok ? '官方地址为 https://api.x.ai/v1。' : isAgnes ? '官方地址为 https://apihub.agnes-ai.com/v1。' : '例如 https://api.openai.com/v1 或中转站提供的 /v1 根地址。'}</small></label>
           <div className="form-grid two-columns">
-            <label className="field"><span>{form.type === 'vision' ? 'API Key' : isSenseNova ? '日日新 API Key' : isGemini ? 'Gemini API Key' : isGrok ? 'xAI API Key' : 'OpenAI API Key'}</span><div className="secret-input"><input type={showApiKey ? 'text' : 'password'} value={form.apiKey} onChange={(event) => update('apiKey', event.target.value)} placeholder={isGemini ? 'AIza...' : 'sk-...'} /><button type="button" disabled={revealingApiKey} onClick={() => void toggleApiKeyVisibility()} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-pressed={showApiKey}>{revealingApiKey ? <span className="secret-loading" /> : <Icon name={showApiKey ? 'eyeOff' : 'eye'} size={17} />}</button></div></label>
+            <label className="field"><span>{form.type === 'vision' ? 'API Key' : isSenseNova ? '日日新 API Key' : isGemini ? 'Gemini API Key' : isGrok ? 'xAI API Key' : isAgnes ? 'Agnes API Key' : 'OpenAI API Key'}</span><div className="secret-input"><input type={showApiKey ? 'text' : 'password'} value={form.apiKey} onChange={(event) => update('apiKey', event.target.value)} placeholder={isGemini ? 'AIza...' : 'sk-...'} /><button type="button" disabled={revealingApiKey} onClick={() => void toggleApiKeyVisibility()} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-pressed={showApiKey}>{revealingApiKey ? <span className="secret-loading" /> : <Icon name={showApiKey ? 'eyeOff' : 'eye'} size={17} />}</button></div></label>
             <label className="field"><span>{form.type === 'vision' ? '视觉识别模型名称 *' : '图片生成模型名称 *'}</span><input value={form.model} onChange={(event) => update('model', event.target.value)} placeholder={defaultModel(form.type, form.provider)} /></label>
           </div>
 
@@ -157,8 +161,8 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
             </div></fieldset>
             <div className="form-grid three-columns">
               <label className="field"><span>默认尺寸</span><select value={form.defaultParams.size || '1024x1024'} onChange={(event) => update('defaultParams', { ...form.defaultParams, size: event.target.value })}><option>1024x1024</option><option>1536x1024</option><option>1024x1536</option><option>512x512</option></select></label>
-              <label className="field"><span>默认数量</span><select disabled={isSenseNova || isGemini} value={isSenseNova || isGemini ? 1 : form.defaultParams.count || 1} onChange={(event) => update('defaultParams', { ...form.defaultParams, count: Number(event.target.value) })}><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select></label>
-              <label className="field"><span>默认质量</span><select disabled={isGemini} value={form.defaultParams.quality || 'auto'} onChange={(event) => update('defaultParams', { ...form.defaultParams, quality: event.target.value })}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
+              <label className="field"><span>默认数量</span><select disabled={isSenseNova || isGemini || isAgnes} value={isSenseNova || isGemini || isAgnes ? 1 : form.defaultParams.count || 1} onChange={(event) => update('defaultParams', { ...form.defaultParams, count: Number(event.target.value) })}><option value="1">1 张</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select></label>
+              <label className="field"><span>默认质量</span><select disabled={isGemini || isAgnes} value={form.defaultParams.quality || 'auto'} onChange={(event) => update('defaultParams', { ...form.defaultParams, quality: event.target.value })}><option value="auto">自动</option><option value="low">低</option><option value="medium">中</option><option value="high">高</option></select></label>
             </div>
           </> : <div className="vision-guide"><strong>视觉识别模型用途</strong><p>用于识别和理解上传图片内容。当前会保存和测试该配置；工作台后续的智能图片分析将使用这里配置的模型。</p></div>}
           {testResult && <div className="test-result">{testResult}</div>}

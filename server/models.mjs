@@ -59,10 +59,11 @@ export function readModels() {
        const host = hostnameOf(baseUrl);
        const isGemini = model.provider === 'gemini' || /(?:^|\.)generativelanguage\.googleapis\.com$/i.test(host);
        const isGrok = model.provider === 'grok' || /(?:^|\.)x\.ai$/i.test(host);
+       const isAgnes = model.provider === 'agnes' || /(?:^|\.)agnes-ai\.com$/i.test(host);
       return {
         ...model,
         type: model.type === 'vision' ? 'vision' : 'image',
-         provider: isSenseNova ? 'sensenova' : isGemini ? 'gemini' : isGrok ? 'grok' : 'openai',
+         provider: isSenseNova ? 'sensenova' : isGemini ? 'gemini' : isGrok ? 'grok' : isAgnes ? 'agnes' : 'openai',
         baseUrl,
         ...(model.type === 'vision' ? { apiFormat: visionApiFormat({ ...model, baseUrl }) } : {}),
       };
@@ -89,11 +90,11 @@ export function upsertModel(input, modelId) {
   const existing = index >= 0 ? config.models[index] : null;
   const requestedId = String(input.id || '').trim();
   const type = input.type === 'vision' ? 'vision' : 'image';
-  const requestedProvider = ['sensenova', 'openai', 'gemini', 'grok'].includes(input.provider) ? input.provider : 'openai';
-  if (type === 'vision' && ['gemini', 'grok'].includes(requestedProvider)) throw Object.assign(new Error('Gemini 和 Grok 当前仅支持配置为图片生成模型'), { status: 400 });
+  const requestedProvider = ['sensenova', 'openai', 'gemini', 'grok', 'agnes'].includes(input.provider) ? input.provider : 'openai';
+  if (type === 'vision' && ['gemini', 'grok', 'agnes'].includes(requestedProvider)) throw Object.assign(new Error('Gemini、Grok 和 Agnes 当前仅支持配置为图片生成模型'), { status: 400 });
   const provider = requestedProvider;
-  const defaultBaseUrl = provider === 'sensenova' ? (type === 'vision' ? 'https://api.sensenova.cn/v1' : 'https://token.sensenova.cn/v1') : provider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : provider === 'grok' ? 'https://api.x.ai/v1' : 'https://api.openai.com/v1';
-  const defaultModel = type === 'vision' ? (provider === 'sensenova' ? 'SenseChat-V6.5' : 'gpt-4.1-mini') : provider === 'sensenova' ? 'sensenova-u1.5-lite' : provider === 'gemini' ? 'gemini-3.1-flash-image' : provider === 'grok' ? 'grok-imagine-image-2.0' : 'gpt-image-2';
+  const defaultBaseUrl = provider === 'sensenova' ? (type === 'vision' ? 'https://api.sensenova.cn/v1' : 'https://token.sensenova.cn/v1') : provider === 'gemini' ? 'https://generativelanguage.googleapis.com/v1beta' : provider === 'grok' ? 'https://api.x.ai/v1' : provider === 'agnes' ? 'https://apihub.agnes-ai.com/v1' : 'https://api.openai.com/v1';
+  const defaultModel = type === 'vision' ? (provider === 'sensenova' ? 'SenseChat-V6.5' : 'gpt-4.1-mini') : provider === 'sensenova' ? 'sensenova-u1.5-lite' : provider === 'gemini' ? 'gemini-3.1-flash-image' : provider === 'grok' ? 'grok-imagine-image-2.0' : provider === 'agnes' ? 'agnes-image-2.0-flash' : 'gpt-image-2';
   if (existing && config.active_model === existing.id && type === 'vision') {
     throw Object.assign(new Error('当前默认图片生成模型不能改为视觉识别模型，请先设定另一个图片生成默认模型'), { status: 400 });
   }

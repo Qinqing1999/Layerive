@@ -320,6 +320,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   const [count, setCount] = useState(1);
   // 右侧面板双模式：对话保留原输入区；批量面板承载批量改图与批量文生图。
   const [rightMode, setRightMode] = useState<'chat' | 'batch'>('chat');
+  const [mobilePanel, setMobilePanel] = useState<'canvas' | 'panel'>('canvas');
   const [batchType, setBatchType] = useState<'edit' | 'text'>('text');
   const [batchStylePrompt, setBatchStylePrompt] = useState('');
   const [batchTemplate, setBatchTemplate] = useState('');
@@ -1151,6 +1152,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
 
   async function send() {
     if ((!prompt.trim() && !inputImageId) || generating) return;
+    setMobilePanel('panel');
     try {
       const result = await api.generate(projectId, {
         prompt: prompt.trim(), operation, modelId, inputImageId, parentVersionId: inputVersion?.id || null,
@@ -1388,7 +1390,12 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
         </div>
       </header>
 
-      <section className="workspace-body">
+      <nav className="mobile-panel-tabs" aria-label="移动端面板切换">
+        <button className={mobilePanel === 'canvas' ? 'active' : ''} onClick={() => setMobilePanel('canvas')}>画布</button>
+        <button className={mobilePanel === 'panel' ? 'active' : ''} onClick={() => setMobilePanel('panel')}>{rightMode === 'batch' ? '批量' : '对话'}</button>
+      </nav>
+
+      <section className={`workspace-body mobile-${mobilePanel}`}>
         <aside className="versions-panel">
           <div className="workspace-panel-title"><div><p className="eyebrow">VERSIONS</p><h2>历史版本</h2></div><span>{bundle.versions.length}</span></div>
           <div className="version-list">

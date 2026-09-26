@@ -3,7 +3,7 @@
 > **维护契约（必须遵守）**：只要改动了项目的功能、架构、数据结构、API、模型适配、运行方式、文件位置或重要约束，必须在同一次改动中更新本文件。先核对相关实现，再更新受影响章节；不要仅凭 README 推断。纯格式调整且不改变行为时可不更新。  
 > 更新时请同步修改本文的“最后核对”日期和相应内容；若现有描述不再可信，优先修正文档而不是保留过期说明。
 
-**最后核对**：2026-09-20
+**最后核对**：2026-09-26
 **项目定位**：Layerive 是一个仅本地运行的、以“项目 + 图片版本树”为中心的 AI 图片创作工作台。它将文生图、基于图片的编辑、文字编辑、局部编辑、扩图、去水印、对话记录和项目备份统一保存到本机。
 
 ## 1. 运行与边界
@@ -62,7 +62,7 @@
 
 - 图片模型：新增、编辑、删除、连接测试、设置默认模型，并按能力控制工作台可用操作。
 - 视觉识别模型：新增、编辑、删除、连接测试、设置默认识别模型；可选择 Anthropic Messages、Chat Completions 或 Responses API 格式（新建默认 Chat Completions），供改字、局部编辑、去水印、提取素材规划使用。工作台顶部可为当前项目切换视觉识别模型，选择保存在项目 `draft.visionModelId` 中；旧项目或已删除的选择回退到全局识别默认模型。API Key 输入框可切换显示 / 隐藏。
-- 已适配图像提供商：OpenAI 兼容、SenseNova、Gemini、Grok；另有仅服务端兼容的本地 `mock` 演示路径。
+- 已适配图像提供商：OpenAI 兼容、SenseNova、Gemini、Grok、Agnes；另有仅服务端兼容的本地 `mock` 演示路径。
 - 已适配视觉请求：Anthropic Messages、OpenAI Chat Completions、OpenAI Responses，并保留 SenseNova 和 Dots（`askdiandian.com`）旧配置兼容。
 
 ## 3. 目录职责
@@ -200,6 +200,7 @@ work/                       临时工作目录（被 Git 忽略）
 | `sensenova` | 复用 OpenAI 适配的专用 JSON 分支 | 生成默认 `watermark: false`、`prompt_extend: true`；编辑输入自动规范化并使用 `size: auto` |
 | `gemini` | `/interactions` | 尺寸映射为 aspect ratio，返回图片块 |
 | `grok` | Images `generations` / `edits` | 输入图以 data URL 放入 JSON |
+| `agnes` | Images `generations` | 图生图也走 `/images/generations` + `image` 数组（非 `/images/edits`）；仅支持 `n:1`，不支持 `quality`/`output_format`/`background`；T2I 用 `return_base64: true`，I2I 从返回 URL 下载图片；默认模型 `agnes-image-2.0-flash`，Base URL `https://apihub.agnes-ai.com/v1` |
 | `mock` | 本地演示 PNG | 仅服务端兼容路径；配置 UI 的常规提供商集合不包含它 |
 
 - 视觉模型以独立的 `apiFormat` 字段选择 `anthropic_messages`、`chat_completions` 或 `responses`。该字段缺失的旧配置不会被重写：`askdiandian.com` 自动沿用 Anthropic Messages，其余配置沿用 Chat Completions；旧 `provider` 字段继续原样保留，视觉请求根据 Base URL 识别 SenseNova 专用端点，避免隐藏的旧提供商值干扰用户修改后的地址。

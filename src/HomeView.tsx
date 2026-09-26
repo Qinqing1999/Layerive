@@ -123,6 +123,12 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
         </nav>
       </aside>
 
+      <nav className="mobile-bottom-nav" aria-label="移动端导航">
+        <button className="mobile-nav-item active" aria-label="项目"><Icon name="grid" size={20} /><span>项目</span></button>
+        <button className="mobile-nav-item" aria-label="模型配置" onClick={onModels}><Icon name="models" size={20} /><span>模型</span></button>
+        <button className="mobile-nav-item" aria-label="数据管理" onClick={() => setDataOpen(true)}><Icon name="data" size={20} /><span>数据</span></button>
+      </nav>
+
       <section className="home-content">
         <header className="topbar">
           <div><p className="eyebrow">Layerive · 本地 AI 图片工作台</p><h1>我的项目</h1></div>
