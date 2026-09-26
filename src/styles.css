@@ -848,6 +848,31 @@ h1 { letter-spacing: -.035em; }
 .mobile-bottom-nav { display: none; }
 .mobile-panel-tabs { display: none; }
 
+/* ---- Login page ---- */
+.login-page { display: grid; place-items: center; min-height: 100vh; min-height: 100dvh; background: #f4f4f6; background-image: radial-gradient(#c9cbd1 0.8px, transparent 0.8px); background-size: 18px 18px; padding: 20px; }
+.login-card { width: 100%; max-width: 360px; background: white; border-radius: 16px; padding: 36px 28px; display: flex; flex-direction: column; gap: 18px; box-shadow: 0 24px 70px #1f202938; }
+.login-brand { text-align: center; margin-bottom: 4px; }
+.login-brand h1 { font-size: 24px; font-weight: 800; color: #1a1c22; margin: 0 0 4px; }
+.login-brand p { font-size: 13px; color: #747983; margin: 0; }
+.login-logo { width: 48px; height: 48px; border-radius: 12px; background: #6d55f7; color: white; font-size: 26px; font-weight: 800; display: grid; place-items: center; margin: 0 auto 12px; }
+.login-field { display: flex; flex-direction: column; gap: 6px; }
+.login-field span { font-size: 13px; font-weight: 600; color: #4a4e57; }
+.login-field input { height: 42px; border: 1px solid #dedfe4; border-radius: 8px; padding: 0 12px; font-size: 14px; color: #1a1c22; background: #fafafa; }
+.login-field input:focus { outline: none; border-color: #6d55f7; background: white; }
+.login-button { height: 44px; border: 0; border-radius: 8px; background: #6d55f7; color: white; font-size: 15px; font-weight: 700; cursor: pointer; margin-top: 4px; }
+.login-button:hover:not(:disabled) { background: #5a45d6; }
+.login-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.nav-logout { margin-top: auto; color: #c95c5c; }
+
+html[data-theme='dark'] .login-page { background: #15171c; background-image: radial-gradient(#2a2d36 0.8px, transparent 0.8px); background-size: 18px 18px; }
+html[data-theme='dark'] .login-card { background: #1b1e25; box-shadow: 0 24px 70px #00000080; }
+html[data-theme='dark'] .login-brand h1 { color: #f0f1f3; }
+html[data-theme='dark'] .login-brand p { color: #8b909a; }
+html[data-theme='dark'] .login-field span { color: #c0c4cc; }
+html[data-theme='dark'] .login-field input { border-color: #2a2d36; color: #f0f1f3; background: #15171c; }
+html[data-theme='dark'] .login-field input:focus { border-color: #6d55f7; background: #1b1e25; }
+html[data-theme='dark'] .nav-logout { color: #d97878; }
+
 @media (max-width: 680px) {
   /* ---- Bottom navigation bar (replaces hidden side-nav) ---- */
   .mobile-bottom-nav { position: fixed; bottom: 0; left: 0; right: 0; z-index: 50; display: flex; justify-content: space-around; align-items: center; height: 56px; background: #17191f; color: white; border-top: 1px solid #2a2d36; padding-bottom: env(safe-area-inset-bottom, 0); }

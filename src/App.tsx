@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
-import { api } from './api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { api, getAuthToken, clearAuthToken } from './api';
+import { LoginView } from './LoginView';
 import { HomeView } from './HomeView';
 import { ModelConfigView } from './ModelConfigView';
 import { WorkspaceView } from './WorkspaceView';
@@ -8,6 +9,7 @@ import type { ModelConfig, Project } from './types';
 type View = { name: 'home' } | { name: 'models'; backTo?: string } | { name: 'workspace'; projectId: string };
 
 export default function App() {
+  const [authed, setAuthed] = useState<boolean | null>(null);
   const [view, setView] = useState<View>({ name: 'home' });
   const [projects, setProjects] = useState<Project[]>([]);
   const [models, setModels] = useState<ModelConfig[]>([]);
@@ -34,10 +36,22 @@ export default function App() {
   }, []);
   const handleProjectChanged = useCallback(() => { void refreshProjects(); }, [refreshProjects]);
 
+  const authCheckRef = useRef(false);
   useEffect(() => {
-    Promise.all([refreshProjects(), refreshModels()])
-      .catch(() => notify('无法连接本地服务，请确认应用服务已经启动。', 'error'))
-      .finally(() => setLoading(false));
+    if (authCheckRef.current) return;
+    authCheckRef.current = true;
+    const token = getAuthToken();
+    if (!token) { setAuthed(false); return; }
+    api.checkAuth().then((r) => {
+      if (r.authenticated) {
+        setAuthed(true);
+        return Promise.all([refreshProjects(), refreshModels()])
+          .catch(() => notify('无法连接本地服务，请确认应用服务已经启动。', 'error'))
+          .finally(() => setLoading(false));
+      }
+      clearAuthToken();
+      setAuthed(false);
+    }).catch(() => { setAuthed(false); });
   }, [refreshProjects, refreshModels, notify]);
 
   async function createProject(input: { name: string; description: string }) {
@@ -97,9 +111,19 @@ export default function App() {
     catch (error) { notify((error as Error).message, 'error'); return ''; }
   }
 
+  async function logout() {
+    try { await api.logout(); } catch { /* ignore */ }
+    clearAuthToken();
+    setAuthed(false);
+    setView({ name: 'home' });
+  }
+
+  if (authed === null) return null;
+  if (!authed) return <LoginView onSuccess={() => { setAuthed(true); setLoading(true); Promise.all([refreshProjects(), refreshModels()]).catch(() => notify('无法连接本地服务，请确认应用服务已经启动。', 'error')).finally(() => setLoading(false)); }} notify={notify} />;
+
   return (
     <>
-      {view.name === 'home' && <HomeView projects={projects} loading={loading} onOpen={(projectId) => setView({ name: 'workspace', projectId })} onCreate={createProject} onDelete={deleteProject} onDuplicate={duplicateProject} onImport={importProject} onRefreshProjects={refreshProjects} onModels={() => setView({ name: 'models' })} notify={notify} />}
+      {view.name === 'home' && <HomeView projects={projects} loading={loading} onOpen={(projectId) => setView({ name: 'workspace', projectId })} onCreate={createProject} onDelete={deleteProject} onDuplicate={duplicateProject} onImport={importProject} onRefreshProjects={refreshProjects} onModels={() => setView({ name: 'models' })} onLogout={logout} notify={notify} />}
       {view.name === 'models' && <ModelConfigView models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} onBack={() => view.backTo ? setView({ name: 'workspace', projectId: view.backTo }) : setView({ name: 'home' })} onSave={saveModel} onDelete={deleteModel} onActivate={activateModel} onActivateVision={activateVisionModel} onTestConfig={testModelConfig} onRevealApiKey={revealModelApiKey} />}
       {view.name === 'workspace' && <WorkspaceView projectId={view.projectId} models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} onBack={() => { setView({ name: 'home' }); void refreshProjects(); }} onModels={() => setView({ name: 'models', backTo: view.projectId })} onProjectChanged={handleProjectChanged} notify={notify} />}
       {toast && <div className={`toast ${toast.kind}`} role="status"><span>{toast.kind === 'success' ? '✓' : '!'}</span>{toast.message}</div>}

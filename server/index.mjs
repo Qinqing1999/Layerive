@@ -15,6 +15,38 @@ const HOST = '127.0.0.1';
 const DIST_ROOT = path.join(APP_ROOT, 'dist');
 const MODELS_CONFIG_PATH = path.join(CONFIG_ROOT, 'models.json');
 
+// ---- Simple session-based auth ----
+const AUTH_USERNAME = 'admin';
+const AUTH_PASSWORD = 'admin';
+const SESSIONS_PATH = path.join(DATA_ROOT, 'sessions.json');
+const sessions = new Set();
+try {
+  const raw = await readFile(SESSIONS_PATH, 'utf-8').catch(() => '[]');
+  for (const token of JSON.parse(raw || '[]')) sessions.add(token);
+} catch { /* ignore */ }
+async function saveSessions() {
+  await writeFile(SESSIONS_PATH, JSON.stringify([...sessions]), 'utf-8').catch(() => {});
+}
+function createSession() {
+  const token = uid() + uid();
+  sessions.add(token);
+  void saveSessions();
+  return token;
+}
+function isValidSession(token) {
+  return typeof token === 'string' && sessions.has(token);
+}
+function getBearerToken(req) {
+  const header = req.headers['authorization'] || '';
+  if (header.startsWith('Bearer ')) return header.slice(7);
+  return '';
+}
+function requireAuth(req) {
+  if (!isValidSession(getBearerToken(req))) {
+    throw Object.assign(new Error('未登录或会话已过期'), { status: 401 });
+  }
+}
+
 // Tasks still marked `generating` when the server starts can never finish —
 // the request died with the previous process. Mark them instead of leaving
 // the workspace stuck on a phantom progress state.
@@ -2405,6 +2437,28 @@ const server = http.createServer(async (req, res) => {
   try {
     if (pathname.startsWith('/api/') || pathname.startsWith('/files/') || pathname.startsWith('/gallery-files/')) assertLocalUiRequest(req);
     if (restoreInProgress && pathname !== '/api/backup/restore' && pathname !== '/api/health') throw restoringError();
+
+    // Auth endpoints (no session required)
+    if (pathname === '/api/auth/login' && req.method === 'POST') {
+      const input = await body(req);
+      if (input.username === AUTH_USERNAME && input.password === AUTH_PASSWORD) {
+        const token = createSession();
+        return json(res, 200, { token });
+      }
+      return json(res, 401, { error: '用户名或密码错误' });
+    }
+    if (pathname === '/api/auth/check' && req.method === 'GET') {
+      return json(res, 200, { authenticated: isValidSession(getBearerToken(req)) });
+    }
+    if (pathname === '/api/auth/logout' && req.method === 'POST') {
+      const token = getBearerToken(req);
+      if (token) { sessions.delete(token); void saveSessions(); }
+      return json(res, 200, { ok: true });
+    }
+
+    // Require auth for all other /api/ routes (except health)
+    if (pathname.startsWith('/api/') && pathname !== '/api/health') requireAuth(req);
+
     if (requestToken) activeServiceRequests.add(requestToken);
     if (pathname.startsWith('/files/') && req.method === 'GET') return await serveFile(req, res, pathname, url.searchParams);
     if (pathname.startsWith('/gallery-files/') && req.method === 'GET') return await serveGalleryFile(res, pathname);

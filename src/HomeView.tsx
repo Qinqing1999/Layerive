@@ -14,12 +14,13 @@ type Props = {
   onImport: (file: File) => Promise<void>;
   onRefreshProjects: () => Promise<void>;
   onModels: () => void;
+  onLogout: () => void;
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
 const formatUpdated = (value: string) => new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 
-export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDuplicate, onImport, onRefreshProjects, onModels, notify }: Props) {
+export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDuplicate, onImport, onRefreshProjects, onModels, onLogout, notify }: Props) {
   const { theme, toggleTheme } = useTheme();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'recent' | 'favorite'>('all');
@@ -120,6 +121,7 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
           <button className="nav-icon active" aria-label="项目"><Icon name="grid" size={19} /></button>
           <button className="nav-icon" aria-label="模型配置" onClick={onModels}><Icon name="models" size={19} /></button>
           <button className="nav-icon" aria-label="数据管理" onClick={() => setDataOpen(true)}><Icon name="data" size={19} /></button>
+          <button className="nav-icon nav-logout" aria-label="退出登录" onClick={onLogout}><Icon name="close" size={19} /></button>
         </nav>
       </aside>
 
@@ -127,6 +129,7 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
         <button className="mobile-nav-item active" aria-label="项目"><Icon name="grid" size={20} /><span>项目</span></button>
         <button className="mobile-nav-item" aria-label="模型配置" onClick={onModels}><Icon name="models" size={20} /><span>模型</span></button>
         <button className="mobile-nav-item" aria-label="数据管理" onClick={() => setDataOpen(true)}><Icon name="data" size={20} /><span>数据</span></button>
+        <button className="mobile-nav-item" aria-label="退出登录" onClick={onLogout}><Icon name="close" size={20} /><span>退出</span></button>
       </nav>
 
       <section className="home-content">

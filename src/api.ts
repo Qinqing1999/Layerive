@@ -1,11 +1,36 @@
 import type { BatchEditProgress, BatchEditResult, GenerateResult, GenerationTask, GalleryEntryItem, LocalEditReference, ModelConfig, ModelsPayload, Project, ProjectBundle, ProjectImage, TextSegment } from './types';
 
+let authToken: string | null = localStorage.getItem('layerive-auth-token');
+
+export function setAuthToken(token: string) {
+  authToken = token;
+  localStorage.setItem('layerive-auth-token', token);
+}
+
+export function clearAuthToken() {
+  authToken = null;
+  localStorage.removeItem('layerive-auth-token');
+}
+
+export function getAuthToken() {
+  return authToken || localStorage.getItem('layerive-auth-token') || null;
+}
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
-    ...init,
-    headers: init?.body ? { 'Content-Type': 'application/json', ...init.headers } : init?.headers,
-  });
+  const headers: Record<string, string> = {};
+  if (init?.body) headers['Content-Type'] = 'application/json';
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  if (init?.headers) {
+    const extra = init.headers as Record<string, string>;
+    Object.assign(headers, extra);
+  }
+  const response = await fetch(url, { ...init, headers });
   const payload = await response.json().catch(() => ({}));
+  if (response.status === 401) {
+    clearAuthToken();
+    window.location.reload();
+    throw new Error('登录已过期，请重新登录');
+  }
   if (!response.ok) throw new Error(payload.error || `请求失败（${response.status}）`);
   return payload as T;
 }
@@ -15,16 +40,26 @@ async function readFileAsBase64(file: File) {
   return dataUrl.replace(/^data:[^;]+;base64,/, '');
 }
 
-function downloadFile(url: string) {
+async function downloadFile(url: string) {
+  const headers: Record<string, string> = {};
+  if (authToken) headers['Authorization'] = `Bearer ${authToken}`;
+  const response = await fetch(url, { headers });
+  if (!response.ok) throw new Error(`下载失败（${response.status}）`);
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement('a');
-  anchor.href = url;
+  anchor.href = objectUrl;
   anchor.download = '';
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 export const api = {
+  login: (username: string, password: string) => request<{ token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  checkAuth: () => request<{ authenticated: boolean }>('/api/auth/check'),
+  logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   listProjects: () => request<{ projects: Project[] }>('/api/projects'),
   createProject: (input: { name: string; description?: string; defaultModelId?: string }) =>
     request<ProjectBundle>('/api/projects', { method: 'POST', body: JSON.stringify(input) }),
