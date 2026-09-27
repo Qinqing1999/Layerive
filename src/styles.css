@@ -809,7 +809,15 @@ h1 { letter-spacing: -.035em; }
 .gallery-detail-block .full-prompt { color: #6a6e78; font-size: 11px; }
 .gallery-detail-actions { display: flex; gap: 8px; }
 .gallery-detail-close { align-self: start; }
-@media (max-width: 760px) { .gallery-body { grid-template-columns: 1fr; } .gallery-cats { display: flex; overflow-x: auto; } .gallery-detail { grid-template-columns: 1fr; } .gallery-detail > img { width: 100%; height: auto; } }
+@media (max-width: 760px) {
+  .gallery-body { grid-template-columns: 1fr; }
+  .gallery-cats { display: flex; overflow-x: auto; }
+  .gallery-detail { grid-template-columns: 1fr; }
+  .gallery-detail > img { width: 100%; height: auto; }
+  /* 卡片操作按钮在触摸设备上始终可见，不依赖 hover */
+  .gallery-card-actions { display: flex; }
+  .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+}
 
 @media (max-width: 1180px) { .workspace-body { grid-template-columns: 190px minmax(360px, 1fr) 340px; } .capability-options { grid-template-columns: repeat(2, 1fr); } .canvas-actions .upload-image-launch, .canvas-actions .local-edit-launch, .canvas-actions .outpaint-launch, .canvas-actions .enhance-launch, .canvas-actions .watermark-remove-launch { width: 28px; padding: 0; justify-content: center; font-size: 0; } }
 @media (max-width: 900px) { .workspace-shell { height: auto; min-height: 100vh; overflow: visible; } .workspace-body { grid-template-columns: 1fr; } .versions-panel { display: none; } .canvas-panel { min-height: 58vh; } .conversation-panel { min-height: 70vh; border-left: 0; border-top: 1px solid var(--line); } .workspace-topbar { grid-template-columns: 1fr auto; } .autosave-state { display: none; } .models-layout { grid-template-columns: 1fr; } .model-list-panel { border-right: 0; border-bottom: 1px solid var(--line); } .model-help { display: none; } }
@@ -998,6 +1006,22 @@ html[data-theme='dark'] .nav-logout { color: #d97878; }
   .gallery-cats button { flex-shrink: 0; }
   .gallery-detail { grid-template-columns: 1fr; }
   .gallery-detail > img { width: 100%; height: auto; max-height: 200px; }
+  /* 画廊标题区换行：标题独占一行，添加按钮+搜索+关闭按钮排第二行 */
+  .gallery-heading { flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+  .gallery-heading > div:first-child { flex: 1 1 100%; }
+  .gallery-heading small { display: none; }
+  .gallery-add-button { margin-left: 0; padding: 7px 11px; font-size: 11px; }
+  .gallery-search { margin-left: 0; flex: 1 1 0; min-width: 0; height: 34px; }
+  .gallery-search input { font-size: 12px; }
+  /* 画廊编辑器单列 */
+  .gallery-editor-body { grid-template-columns: 1fr; gap: 14px; padding: 0 12px; }
+  .gallery-editor-head { padding: 14px 12px 8px; }
+  .gallery-editor-head strong { font-size: 14px; }
+  .gallery-editor-actions { padding: 10px 12px 14px; }
+  .gallery-editor-preview { min-height: 140px; }
+  .gallery-editor-preview img { max-height: 200px; }
+  .gallery-detail-copy { max-height: none; }
+  .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
 
   /* ---- Model config page ---- */
   .settings-page { padding: 12px; padding-bottom: 70px; }
@@ -1033,6 +1057,8 @@ html[data-theme='dark'] .nav-logout { color: #d97878; }
   .message-gallery { grid-template-columns: 1fr; }
   .gallery-cats button { padding: 7px 9px; }
   .cat-name { font-size: 11px; }
+  .gallery-grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 8px; }
+  .gallery-add-button span { font-size: 10px; }
 }
 
 /* ============================================================
@@ -1158,6 +1184,8 @@ html[data-theme='dark'] .canvas-actions span { color: #8b909b; }
 html[data-theme='dark'] .canvas-actions .zoom-label { color: #8b909b; }
 html[data-theme='dark'] .canvas-stage { background-color: #131519; background-image: radial-gradient(#262932 0.8px, transparent 0.8px); }
 html[data-theme='dark'] .canvas-image-wrap { background: #1e2129; border-color: #1e2129; }
+html[data-theme='dark'] .canvas-loading-overlay { background: #1e2129; }
+html[data-theme='dark'] .canvas-loading-overlay .spinner { border-color: #3a3d47; border-top-color: var(--accent); }
 html[data-theme='dark'] .empty-visual span { border-color: #1e2129; }
 html[data-theme='dark'] .canvas-empty p { color: #9aa0ab; }
 html[data-theme='dark'] .outpaint-preview { border-color: #3a6b62; background: repeating-conic-gradient(#1a2b27 0 25%, #16211e 0 50%) 50% / 18px 18px; }
