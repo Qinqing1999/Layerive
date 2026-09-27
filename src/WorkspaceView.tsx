@@ -320,7 +320,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   const [count, setCount] = useState(1);
   // 右侧面板双模式：对话保留原输入区；批量面板承载批量改图与批量文生图。
   const [rightMode, setRightMode] = useState<'chat' | 'batch'>('chat');
-  const [mobilePanel, setMobilePanel] = useState<'canvas' | 'panel'>('canvas');
+  const [mobilePanel, setMobilePanel] = useState<'canvas' | 'panel' | 'versions'>('canvas');
   const [batchType, setBatchType] = useState<'edit' | 'text'>('text');
   const [batchStylePrompt, setBatchStylePrompt] = useState('');
   const [batchTemplate, setBatchTemplate] = useState('');
@@ -1393,6 +1393,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
       <nav className="mobile-panel-tabs" aria-label="移动端面板切换">
         <button className={mobilePanel === 'canvas' ? 'active' : ''} onClick={() => setMobilePanel('canvas')}>画布</button>
         <button className={mobilePanel === 'panel' ? 'active' : ''} onClick={() => setMobilePanel('panel')}>{rightMode === 'batch' ? '批量' : '对话'}</button>
+        <button className={mobilePanel === 'versions' ? 'active' : ''} onClick={() => setMobilePanel('versions')}>版本</button>
       </nav>
 
       <section className={`workspace-body mobile-${mobilePanel}`}>

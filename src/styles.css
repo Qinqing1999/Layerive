@@ -919,6 +919,9 @@ html[data-theme='dark'] .nav-logout { color: #d97878; }
   .workspace-body.mobile-canvas .conversation-panel { display: none; }
   .workspace-body.mobile-panel .canvas-panel { display: none; }
   .workspace-body.mobile-panel .conversation-panel { display: grid; border-left: 0; }
+  .workspace-body.mobile-versions .canvas-panel { display: none; }
+  .workspace-body.mobile-versions .conversation-panel { display: none; }
+  .workspace-body.mobile-versions .versions-panel { display: flex !important; border-right: 0; }
   .versions-panel { display: none !important; }
   .canvas-panel { min-height: 0; grid-template-rows: auto 1fr !important; }
   .canvas-stage { padding: 12px; }
