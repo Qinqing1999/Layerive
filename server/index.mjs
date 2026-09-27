@@ -1,7 +1,8 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, renameSync, rmSync, createReadStream, statSync } from 'node:fs';
+import sharp from 'sharp';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { APP_ROOT, CONFIG_ROOT, DATA_ROOT, db, closeDatabase, ensureProjectDirs, GALLERY_ROOT, imageDto, now, parseJson, PROJECTS_ROOT, projectDto, uid } from './db.mjs';
@@ -2338,23 +2339,33 @@ async function serveFile(req, res, pathname, searchParams) {
   const extension = path.extname(absolute).toLowerCase();
   const mime = extension === '.jpg' || extension === '.jpeg' ? 'image/jpeg' : extension === '.webp' ? 'image/webp' : 'image/png';
   let payloadPath = absolute;
+  let payloadMime = mime;
   const width = Math.min(2048, Math.max(0, Number(searchParams.get('w')) || 0));
-  if (width >= 64 && extension === '.png') {
+  if (width >= 64) {
     try {
       const projectSegment = relative.split(/[\\/]/)[0];
-      const cachePath = path.join(PROJECTS_ROOT, projectSegment, 'thumbnails', `${path.basename(absolute, '.png')}_w${width}.png`);
+      const baseName = path.basename(absolute, extension);
+      // Sharp 统一缩略图，输出 WebP 格式（体积更小、编码更快）
+      const cachePath = path.join(PROJECTS_ROOT, projectSegment, 'thumbnails', `${baseName}_w${width}.webp`);
       if (!existsSync(cachePath)) {
-        const thumbnail = makeThumbnailPng(await readFile(absolute), width);
-        if (thumbnail) {
+        const sourceWidth = readImageDimensions(await readFile(absolute), mime)?.width || 0;
+        // 只缩小不放大
+        if (sourceWidth > width) {
+          const buffer = await sharp(absolute).resize({ width, withoutEnlargement: true }).webp({ quality: 90 }).toBuffer();
           mkdirSync(path.dirname(cachePath), { recursive: true });
-          await writeFile(cachePath, thumbnail);
+          await writeFile(cachePath, buffer);
         }
       }
-      if (existsSync(cachePath)) payloadPath = cachePath;
+      if (existsSync(cachePath)) { payloadPath = cachePath; payloadMime = 'image/webp'; }
     } catch { /* fall back to the original file */ }
   }
-  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
-  res.end(await readFile(payloadPath));
+  const stat = statSync(payloadPath);
+  res.writeHead(200, {
+    'Content-Type': payloadMime,
+    'Content-Length': stat.size,
+    'Cache-Control': 'public, max-age=86400',
+  });
+  createReadStream(payloadPath).pipe(res);
 }
 
 async function serveGalleryFile(res, pathname) {
@@ -2363,8 +2374,9 @@ async function serveGalleryFile(res, pathname) {
   if (!absolute.startsWith(GALLERY_ROOT + path.sep) || !existsSync(absolute)) return json(res, 404, { error: '图片不存在' });
   const extension = path.extname(absolute).toLowerCase();
   const mime = GALLERY_MIME[extension.slice(1)] || 'application/octet-stream';
-  res.writeHead(200, { 'Content-Type': mime, 'Cache-Control': 'no-cache' });
-  res.end(await readFile(absolute));
+  const stat = statSync(absolute);
+  res.writeHead(200, { 'Content-Type': mime, 'Content-Length': stat.size, 'Cache-Control': 'public, max-age=86400' });
+  createReadStream(absolute).pipe(res);
 }
 
 async function serveApp(res, pathname) {
