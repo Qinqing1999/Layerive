@@ -1235,6 +1235,7 @@ async function runGenerationTask(projectId, taskId, context) {
       const relative = path.join('generated', `${imageId}.${extension}`);
       const absolute = path.join(PROJECTS_ROOT, projectId, relative);
       await writeFile(absolute, output.bytes);
+      void preGenerateCanvasThumbnail(projectId, relative);
       const dimensions = readImageDimensions(output.bytes, output.mimeType) || { width, height };
       savedOutputs.push({ imageId, relative, output: { ...output, width: output.width || dimensions.width, height: output.height || dimensions.height } });
       controller.signal.throwIfAborted();
@@ -1497,6 +1498,7 @@ async function runBatchEditTask(projectId, taskId, context) {
         const extension = output.mimeType.includes('jpeg') ? 'jpg' : output.mimeType.includes('webp') ? 'webp' : 'png';
         const relative = path.join('generated', `${imageId}.${extension}`);
         await writeFile(path.join(PROJECTS_ROOT, projectId, relative), output.bytes);
+        void preGenerateCanvasThumbnail(projectId, relative);
         controller.signal.throwIfAborted();
         item.status = 'success';
         item.imageId = imageId;
@@ -1658,6 +1660,7 @@ async function runBatchGenerateTask(projectId, taskId, context) {
         const extension = output.mimeType.includes('jpeg') ? 'jpg' : output.mimeType.includes('webp') ? 'webp' : 'png';
         const relative = path.join('generated', `${imageId}.${extension}`);
         await writeFile(path.join(PROJECTS_ROOT, projectId, relative), output.bytes);
+        void preGenerateCanvasThumbnail(projectId, relative);
         controller.signal.throwIfAborted();
         item.status = 'success';
         item.imageId = imageId;
@@ -1834,6 +1837,7 @@ async function runLocalEditBatchTask(projectId, taskId, context) {
         const extension = output.mimeType.includes('jpeg') ? 'jpg' : output.mimeType.includes('webp') ? 'webp' : 'png';
         const relative = path.join('generated', `${imageId}.${extension}`);
         await writeFile(path.join(PROJECTS_ROOT, projectId, relative), output.bytes);
+        void preGenerateCanvasThumbnail(projectId, relative);
         controller.signal.throwIfAborted();
         item.status = 'success';
         item.imageId = imageId;
@@ -2328,6 +2332,25 @@ async function restoreBackup(buffer) {
     rmSync(staging, { recursive: true, force: true });
   }
   return { safetyBackup: path.relative(DATA_ROOT, safety) };
+}
+
+// ---- Pre-generate canvas thumbnail (1280px WebP) ----------------------------
+// The canvas always requests ?w=1280. Generating it eagerly after write avoids
+// a first-request Sharp resize that blocks the image from appearing.
+async function preGenerateCanvasThumbnail(projectId, relative) {
+  try {
+    const absolute = path.join(PROJECTS_ROOT, projectId, relative);
+    const ext = path.extname(relative).toLowerCase();
+    const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : ext === '.webp' ? 'image/webp' : 'image/png';
+    const sourceWidth = readImageDimensions(await readFile(absolute), mime)?.width || 0;
+    if (sourceWidth <= 1280) return;
+    const baseName = path.basename(absolute, ext);
+    const cachePath = path.join(PROJECTS_ROOT, projectId, 'thumbnails', `${baseName}_w1280.webp`);
+    if (existsSync(cachePath)) return;
+    const buffer = await sharp(absolute).resize({ width: 1280, withoutEnlargement: true }).webp({ quality: 90 }).toBuffer();
+    mkdirSync(path.dirname(cachePath), { recursive: true });
+    await writeFile(cachePath, buffer);
+  } catch { /* best-effort; serveFile will retry on demand */ }
 }
 
 // ---- Static files with on-demand thumbnails ---------------------------------

@@ -214,13 +214,6 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
             {!visible.length && <div className="empty-search">没有找到匹配的项目</div>}
           </section>
         )}
-
-        <footer className="home-footer">
-          <a className="github-link" href="https://github.com/newljs/Layerive" target="_blank" rel="noreferrer" title="在 GitHub 查看项目源码">
-            <Icon name="github" size={14} />
-            GitHub · newljs/Layerive
-          </a>
-        </footer>
       </section>
 
       <input ref={importRef} hidden type="file" accept=".zip" onChange={(event) => {
