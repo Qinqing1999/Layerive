@@ -377,6 +377,9 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   const [localDragging, setLocalDragging] = useState(false);
   const [extractDragging, setExtractDragging] = useState(false);
   const [zoom, setZoom] = useState(1);
+  // 画布主图加载状态：切换 currentImageId 时置为 loading，<img onLoad> 后置为 done。
+  // 首次请求某张图的 1280 缩略图时，后端需用 Sharp 现生成 WebP，期间显示 spinner 占位。
+  const [canvasImgStatus, setCanvasImgStatus] = useState<'loading' | 'done'>('loading');
   const fileRef = useRef<HTMLInputElement>(null);
   const batchImportFileRef = useRef<HTMLInputElement>(null);
   const uploadingRef = useRef(false);
@@ -673,12 +676,14 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   }
 
   // 切换画布图片时，针对旧图片的圈选与截图预览全部失效，一并清理。
+  // 同时重置加载状态，以便新图首次请求缩略图时显示 loading 占位。
   useEffect(() => {
     setLocalEditRect(null);
     localReferenceRevision.current++;
     setLocalReference(null);
     setLocalReferenceLoading(false);
     closeExtract();
+    setCanvasImgStatus('loading');
   }, [currentImageId]);
 
   // 画廊条目的去向跟随当前面板：对话模式填入聊天输入框；批量模式追加为提示词
@@ -1413,7 +1418,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
           </div>
           <div className={`canvas-stage ${(localEditMode || extractMode) ? 'selection-mode' : ''}`} onPointerDown={onCanvasSelectionStart} onPointerMove={onCanvasSelectionMove} onPointerUp={onCanvasSelectionEnd} onPointerCancel={onCanvasSelectionCancel}>
             {currentImage && <button type="button" className="batch-launch" disabled={!batchEditSupported || generating} title={!batchEditSupported ? '当前模型不支持提示词改图' : '在右侧批量面板中，以当前画布图片为基准逐张批量处理'} onPointerDown={(event) => event.stopPropagation()} onClick={openBatchPanel}><Icon name="grid" size={14} /> 批量处理</button>}
-            {currentImage ? <div className={`canvas-image-wrap ${zoom !== 1 ? 'is-zoomed' : ''} ${localEditMode ? 'local-editing' : ''} ${(extractMode || extractRect) ? 'extracting' : ''} ${outpaintMode ? 'outpaint-preview-wrap' : ''}`} style={zoom !== 1 ? { width: `${zoom * 100}%` } : undefined} onContextMenu={(event) => openImageContextMenu(event, currentImage.id)}>{outpaintMode ? <div className="outpaint-preview" style={outpaintAspectRatio ? { aspectRatio: outpaintAspectRatio } : undefined}><img src={thumbUrl(currentImage, 1280)} alt={`扩图预览${currentVersion ? `版本 V${currentVersion.number}` : ''}`} /><span>新增画布区域</span></div> : <img src={thumbUrl(currentImage, 1280)} alt={`项目图片${currentVersion ? `版本 V${currentVersion.number}` : ''}`} />}{(localEditMode || localEditRect) && <div className="local-edit-surface">{localEditRect && <span className="local-edit-rect" style={{ left: `${localEditRect.x}%`, top: `${localEditRect.y}%`, width: `${localEditRect.width}%`, height: `${localEditRect.height}%` }}><em>修改区域</em></span>}</div>}{(extractMode || extractRect) && <div className="extract-surface">{extractRect && <span className="extract-rect" style={{ left: `${extractRect.x}%`, top: `${extractRect.y}%`, width: `${extractRect.width}%`, height: `${extractRect.height}%` }}><em>提取区域</em></span>}</div>}<span className="image-chip">{outpaintMode ? `目标 ${outpaintSize}` : `${currentImage.width || '—'} × ${currentImage.height || '—'}`}</span></div> : (
+            {currentImage ? <div className={`canvas-image-wrap ${zoom !== 1 ? 'is-zoomed' : ''} ${localEditMode ? 'local-editing' : ''} ${(extractMode || extractRect) ? 'extracting' : ''} ${outpaintMode ? 'outpaint-preview-wrap' : ''} ${canvasImgStatus === 'loading' ? 'is-loading' : ''}`} style={zoom !== 1 ? { width: `${zoom * 100}%` } : undefined} onContextMenu={(event) => openImageContextMenu(event, currentImage.id)}>{outpaintMode ? <div className="outpaint-preview" style={outpaintAspectRatio ? { aspectRatio: outpaintAspectRatio } : undefined}><img src={thumbUrl(currentImage, 1280)} alt={`扩图预览${currentVersion ? `版本 V${currentVersion.number}` : ''}`} onLoad={() => setCanvasImgStatus('done')} /><span>新增画布区域</span></div> : <img src={thumbUrl(currentImage, 1280)} alt={`项目图片${currentVersion ? `版本 V${currentVersion.number}` : ''}`} onLoad={() => setCanvasImgStatus('done')} />}{canvasImgStatus === 'loading' && <div className="canvas-loading-overlay"><span className="spinner" /></div>}{(localEditMode || localEditRect) && <div className="local-edit-surface">{localEditRect && <span className="local-edit-rect" style={{ left: `${localEditRect.x}%`, top: `${localEditRect.y}%`, width: `${localEditRect.width}%`, height: `${localEditRect.height}%` }}><em>修改区域</em></span>}</div>}{(extractMode || extractRect) && <div className="extract-surface">{extractRect && <span className="extract-rect" style={{ left: `${extractRect.x}%`, top: `${extractRect.y}%`, width: `${extractRect.width}%`, height: `${extractRect.height}%` }}><em>提取区域</em></span>}</div>}<span className="image-chip">{outpaintMode ? `目标 ${outpaintSize}` : `${currentImage.width || '—'} × ${currentImage.height || '—'}`}</span></div> : (
               <div className="canvas-empty"><div className="empty-visual"><span /><span /><span /></div><h2>开始你的第一张作品</h2><p>在右侧输入创作描述，或者上传 / 直接 Ctrl+V 粘贴一张图片进行修改。</p><button className="button secondary" onClick={() => fileRef.current?.click()}>上传初始图片</button></div>
             )}
             {localEditMode && !localDragging && currentImage && <div className="local-edit-dock">

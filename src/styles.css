@@ -233,6 +233,10 @@ button:disabled, a.disabled { cursor: not-allowed; opacity: .48; pointer-events:
 .canvas-image-wrap img { max-width: 100%; max-height: calc(100vh - 190px); display: block; object-fit: contain; }
 .canvas-image-wrap.is-zoomed { max-width: none; max-height: none; }
 .canvas-image-wrap.is-zoomed img { width: 100%; max-width: none; max-height: none; }
+.canvas-image-wrap.is-loading img { opacity: 0; }
+.canvas-image-wrap img { transition: opacity .25s ease; }
+.canvas-loading-overlay { position: absolute; z-index: 1; inset: 0; display: grid; place-items: center; background: #f4f5f7; }
+.canvas-loading-overlay .spinner { width: 28px; height: 28px; border-width: 3px; border-color: #d3d5db; border-top-color: #6c7079; }
 .canvas-image-wrap.outpaint-preview-wrap { width: min(100%, 680px); max-height: none; }
 .outpaint-preview { position: relative; width: 100%; display: grid; place-items: center; overflow: hidden; border: 2px dashed #54a99d; box-sizing: border-box; background: repeating-conic-gradient(#dff2ed 0 25%, #f7fcfa 0 50%) 50% / 18px 18px; box-shadow: inset 0 0 0 7px #ffffff9e; }
 .outpaint-preview::after { position: absolute; z-index: 1; inset: 0; border: 12px solid #52aa9d12; content: ''; pointer-events: none; }
