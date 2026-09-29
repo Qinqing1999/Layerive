@@ -2754,18 +2754,32 @@ const server = http.createServer(async (req, res) => {
       const mime = String(input.mimeType || '');
       if (!['image/png', 'image/jpeg', 'image/webp'].includes(mime)) throw Object.assign(new Error('仅支持 PNG、JPG 和 WebP'), { status: 400 });
       const encoded = String(input.data || '').replace(/^data:[^;]+;base64,/, '');
-      const bytes = Buffer.from(encoded, 'base64');
-      if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw Object.assign(new Error('图片不能为空且不能超过 10MB'), { status: 400 });
-      const dimensions = readImageDimensions(bytes, mime);
+      let finalBytes = Buffer.from(encoded, 'base64');
+      if (!finalBytes.length || finalBytes.length > 10 * 1024 * 1024) throw Object.assign(new Error('图片不能为空且不能超过 10MB'), { status: 400 });
+      let finalMime = mime;
+      // 手机拍摄的照片常带 EXIF 旋转标记：原始像素是横向的、各端显示时被转成纵向。
+      // 若不把方向烘焙进像素，画布框选/裁剪按显示坐标换算的百分比会与实际像素错位。
+      // 检测到方向标记时统一转正并重编码，保证「像素即所见」。
+      let dimensions = null;
+      try {
+        const meta = await sharp(finalBytes).metadata();
+        if ((meta.orientation || 1) > 1) {
+          const oriented = await sharp(finalBytes).rotate().jpeg({ quality: 92 }).toBuffer({ resolveWithObject: true });
+          finalBytes = oriented.data;
+          finalMime = 'image/jpeg';
+          dimensions = { width: oriented.info.width, height: oriented.info.height };
+        }
+      } catch { /* sharp 不支持该格式时退回原始字节 */ }
+      if (!dimensions) dimensions = readImageDimensions(finalBytes, finalMime);
       if (!dimensions) throw Object.assign(new Error('无法读取图片尺寸，请重新选择有效的 PNG、JPG 或 WebP 图片'), { status: 400 });
       ensureProjectDirs(projectId);
       const imageId = uid();
-      const extension = mime === 'image/jpeg' ? 'jpg' : mime === 'image/webp' ? 'webp' : 'png';
+      const extension = finalMime === 'image/jpeg' ? 'jpg' : finalMime === 'image/webp' ? 'webp' : 'png';
       const relative = path.join('uploads', `${imageId}.${extension}`);
-      await writeFile(path.join(PROJECTS_ROOT, projectId, relative), bytes);
+      await writeFile(path.join(PROJECTS_ROOT, projectId, relative), finalBytes);
       db.prepare(`INSERT INTO images (id, project_id, source_type, file_path, mime_type, width, height, file_size, created_at)
         VALUES (?, ?, 'upload', ?, ?, ?, ?, ?, ?)`)
-        .run(imageId, projectId, relative, mime, dimensions.width, dimensions.height, bytes.length, now());
+        .run(imageId, projectId, relative, finalMime, dimensions.width, dimensions.height, finalBytes.length, now());
       db.prepare('UPDATE projects SET current_image_id = ?, updated_at = ? WHERE id = ?').run(imageId, now(), projectId);
       return json(res, 201, bundle(projectId));
     }

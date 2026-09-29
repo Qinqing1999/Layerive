@@ -21,6 +21,8 @@ type CropAsset = {
 type Props = {
   visible: boolean;
   uri: string;
+  /** 依据 EXIF 计算的顺时针旋转角度（Android 原生裁剪不自动烘焙 EXIF 方向，需先旋转再裁剪） */
+  rotation?: number;
   onCancel: () => void;
   onUseOriginal: (asset: CropAsset) => void;
   onConfirm: (asset: CropAsset) => void;
@@ -35,7 +37,7 @@ const MIN_PERCENT = 2;
  * 上传裁剪：与工作台「局部」框选同款交互——
  * 在图片上拖拽画出选区（松手保持，可重新拖拽改选），确认后按选区裁剪导入。
  */
-export function CropView({ visible, uri, onCancel, onUseOriginal, onConfirm }: Props) {
+export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, onConfirm }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
@@ -133,9 +135,14 @@ export function CropView({ visible, uri, onCancel, onUseOriginal, onConfirm }: P
       const cropY = Math.round(((dragRect.y - display.y) / display.h) * imgSize.h);
       const cropW = Math.max(1, Math.round((dragRect.width / display.w) * imgSize.w));
       const cropH = Math.max(1, Math.round((dragRect.height / display.h) * imgSize.h));
+      // Android 原生裁剪不烘焙 EXIF：显示时已按 EXIF 转向，先旋转到显示方向再裁剪，
+      // 否则带 EXIF 的照片裁出来区域和看到的不一致
+      const actions: ImageManipulator.Action[] = [];
+      if (rotation) actions.push({ rotate: rotation });
+      actions.push({ crop: { originX: cropX, originY: cropY, width: cropW, height: cropH } });
       const out = await ImageManipulator.manipulateAsync(
         uri,
-        [{ crop: { originX: cropX, originY: cropY, width: cropW, height: cropH } }],
+        actions,
         { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG, base64: true }
       );
       if (!out.base64) throw new Error('裁剪失败，请重试');

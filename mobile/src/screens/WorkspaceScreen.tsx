@@ -42,14 +42,24 @@ type Props = {
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
-type SheetName = 'history' | 'compare' | 'editText' | 'batch' | 'gallery' | 'localEdit' | 'outpaint' | 'extractHint' | null;
+type SheetName = 'tasks' | 'history' | 'compare' | 'editText' | 'batch' | 'gallery' | 'localEdit' | 'outpaint' | 'extractHint' | null;
 type SelectMode = 'localEdit' | 'extract' | null;
+type WorkspaceTab = 'canvas' | 'chat' | 'history';
 
 /** 图片百分比坐标（与服务端 rect 字段一致） */
 type PercentRect = { x: number; y: number; width: number; height: number };
 
 /** 画布内拖拽产生的显示坐标矩形 */
 type DragRect = { x: number; y: number; width: number; height: number };
+
+/** EXIF Orientation → 顺时针旋转角度（Android 裁剪不自动烘焙 EXIF，需显式旋转） */
+function exifRotation(asset: { exif?: Record<string, unknown> | null }): number {
+  const orientation = Number(asset.exif?.Orientation ?? 1);
+  if (orientation === 3 || orientation === 4) return 180;
+  if (orientation === 5 || orientation === 6) return 90;
+  if (orientation === 7 || orientation === 8) return 270;
+  return 0;
+}
 
 const STAGE_LABELS: Record<string, string> = {
   planning: '视觉定位中…',
@@ -73,12 +83,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
   const [prompt, setPrompt] = useState('');
   const [generating, setGenerating] = useState(false);
   const [activeTask, setActiveTask] = useState<GenerationTask | null>(null);
-  const [bottomTab, setBottomTab] = useState<'canvas' | 'chat'>('canvas');
+  const [bottomTab, setBottomTab] = useState<WorkspaceTab>('canvas');
   const insets = useSafeAreaInsets();
-  const [preview, setPreview] = useState<{ image: ProjectImage; message: Message } | null>(null);
+  const [preview, setPreview] = useState<{ image: ProjectImage; message?: Message } | null>(null);
   const [count, setCount] = useState(1);
   const [uploading, setUploading] = useState(false);
-  const [cropAsset, setCropAsset] = useState<{ uri: string; data: string; mimeType: string; name: string; use: 'upload' | 'reference' } | null>(null);
+  const [cropAsset, setCropAsset] = useState<{ uri: string; data: string; mimeType: string; name: string; use: 'upload' | 'reference'; rotation: number } | null>(null);
   const [parentVersionId, setParentVersionId] = useState<string | null>(null);
   const [sheet, setSheet] = useState<SheetName>(null);
   const [selectMode, setSelectMode] = useState<SelectMode>(null);
@@ -228,6 +238,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         mimeType: asset.mimeType || 'image/jpeg',
         name: asset.fileName || `photo-${Date.now()}.jpg`,
         use: 'upload',
+        rotation: exifRotation(asset),
       });
     } catch (e) {
       notify((e as Error).message, 'error');
@@ -263,6 +274,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         mimeType: asset.mimeType || 'image/jpeg',
         name: asset.fileName || 'reference.jpg',
         use: 'reference',
+        rotation: exifRotation(asset),
       });
     } catch (e) {
       notify((e as Error).message, 'error');
@@ -637,6 +649,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         <Text style={styles.topbarTitle} numberOfLines={1}>
           {bundle.project.name}{parentVersionId ? '（从历史继续）' : ''}
         </Text>
+        {activeTask ? (
+          <Pressable style={styles.taskPill} onPress={() => setSheet('tasks')}>
+            <ActivityIndicator size="small" color="#fff" />
+            <Text style={styles.taskPillText} numberOfLines={1}>{taskLabel}</Text>
+          </Pressable>
+        ) : null}
         <Pressable onPress={() => setSheet('gallery')} hitSlop={8} style={styles.topbarBtn}>
           <Icon name="gallery" size={18} color={colors.text} />
         </Pressable>
@@ -645,8 +663,18 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         </Pressable>
       </View>
 
-      {/* 画布页（框选蒙版直接叠加在画布上，工具栏为底部固定行不遮图） */}
-      {bottomTab === 'canvas' ? (
+      {/* 历史版本独立页面 */}
+      {bottomTab === 'history' ? (
+        <View style={styles.historyPage}>
+          <HistoryModal
+            bundle={bundle}
+            onUseVersion={useVersion}
+            onDeleteVersion={deleteVersion}
+            onDownloadVersion={downloadVersionZip}
+          />
+        </View>
+      ) : bottomTab === 'canvas' ? (
+      /* 画布页（框选蒙版直接叠加在画布上，工具栏为底部固定行不遮图） */
       <View style={styles.canvasArea}>
       <View
         ref={canvasWrapRef}
@@ -658,17 +686,23 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         {...panResponder.panHandlers}
       >
         {currentImage ? (
-          <Image
-            source={imageSource(currentImage.url, 1280)}
+          <Pressable
             style={imageDisplay
               ? { position: 'absolute', left: imageDisplay.left, top: imageDisplay.top, width: imageDisplay.w, height: imageDisplay.h }
               : styles.canvasImage}
-            resizeMode="stretch"
-          />
+            disabled={Boolean(selectMode)}
+            onPress={() => setPreview({ image: currentImage })}
+          >
+            <Image
+              source={imageSource(currentImage.url, 1280)}
+              style={{ width: '100%', height: '100%' }}
+              resizeMode="stretch"
+            />
+          </Pressable>
         ) : (
           <Pressable style={styles.canvasEmpty} onPress={pickImage}>
             <Icon name="image" size={48} color={colors.border} />
-            <Text style={styles.canvasEmptyText}>点击上传图片，或输入提示词开始创作</Text>
+            <Text style={styles.canvasEmptyText}>点击上传图片开始创作</Text>
           </Pressable>
         )}
 
@@ -690,7 +724,6 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
             contentContainerStyle={styles.toolList}
             showsHorizontalScrollIndicator={false}
           >
-            <ToolBtn icon="history" label="历史" colors={colors} onPress={() => setSheet('history')} />
             <ToolBtn icon="compare" label="对比" colors={colors} disabled={!parentImage} onPress={() => setSheet('compare')} />
             <ToolBtn icon="text" label="改字" colors={colors} disabled={!currentImage} onPress={() => setSheet('editText')} />
             <ToolBtn icon="region" label="局部" colors={colors} active={selectMode === 'localEdit'} disabled={!currentImage} onPress={() => toggleSelectMode('localEdit')} />
@@ -752,7 +785,22 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         </ScrollView>
       )}
 
-      {/* Tab 栏：画布 / 对话 */}
+      {/* 任务失败横幅（任意页签可见，紧贴底部导航） */}
+      {failedTask ? (
+        <View style={styles.failedBar}>
+          <Text style={styles.failedText} numberOfLines={2}>{failedTask.error || '任务失败'}</Text>
+          {failedTask.retryable ? (
+            <Pressable style={styles.failedRetry} onPress={retryFailed}>
+              <Text style={styles.failedRetryText}>重试</Text>
+            </Pressable>
+          ) : null}
+          <Pressable hitSlop={6} onPress={() => setFailedTask(null)}>
+            <Icon name="close" size={16} color={colors.muted} />
+          </Pressable>
+        </View>
+      ) : null}
+
+      {/* 底部导航：画布 / 对话 / 历史 */}
       <View style={styles.tabBar}>
         <Pressable style={[styles.tabBtn, bottomTab === 'canvas' && styles.tabBtnActive]} onPress={() => setBottomTab('canvas')}>
           <Icon name="image" size={16} color={bottomTab === 'canvas' ? '#fff' : colors.textSecondary} />
@@ -762,44 +810,24 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         <Pressable style={[styles.tabBtn, bottomTab === 'chat' && styles.tabBtnActive]} onPress={() => setBottomTab('chat')}>
           <Icon name="chatbubble" size={16} color={bottomTab === 'chat' ? '#fff' : colors.textSecondary} />
           <Text style={[styles.tabText, bottomTab === 'chat' && styles.tabTextActive]}>对话</Text>
-          {taskLabel ? <View style={styles.tabDot} /> : null}
+          {activeTask ? <View style={styles.tabDot} /> : null}
+        </Pressable>
+        <Pressable style={[styles.tabBtn, bottomTab === 'history' && styles.tabBtnActive]} onPress={() => setBottomTab('history')}>
+          <Icon name="history" size={16} color={bottomTab === 'history' ? '#fff' : colors.textSecondary} />
+          <Text style={[styles.tabText, bottomTab === 'history' && styles.tabTextActive]}>历史</Text>
         </Pressable>
       </View>
 
-      {/* Input bar */}
+      {/* 输入栏：仅对话页显示，避免与画布页重复 */}
+      {bottomTab === 'chat' ? (
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        {failedTask ? (
-          <View style={styles.failedBar}>
-            <Text style={styles.failedText} numberOfLines={2}>{failedTask.error || '任务失败'}</Text>
-            {failedTask.retryable ? (
-              <Pressable style={styles.failedRetry} onPress={retryFailed}>
-                <Text style={styles.failedRetryText}>重试</Text>
-              </Pressable>
-            ) : null}
-            <Pressable hitSlop={6} onPress={() => setFailedTask(null)}>
-              <Icon name="close" size={16} color={colors.muted} />
-            </Pressable>
-          </View>
-        ) : null}
         <View style={styles.inputBar}>
           <View style={styles.countRow}>
-            <Text style={styles.countLabel}>数量</Text>
-            {[1, 2, 3, 4].map((n) => (
-              <Pressable key={n} style={[styles.countBtn, count === n && styles.countBtnActive]} onPress={() => setCount(n)}>
-                <Text style={[styles.countText, count === n && styles.countTextActive]}>{n}</Text>
-              </Pressable>
-            ))}
+            <CountSelect value={count} onChange={setCount} colors={colors} />
             <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
               <Icon name="batch" size={13} color={colors.accent} />
-              <Text style={styles.batchPillText}>批量</Text>
+              <Text style={styles.batchPillText}>批量创作</Text>
             </Pressable>
-            {taskLabel ? (
-              <Pressable style={styles.taskPill} onPress={cancelTask}>
-                <ActivityIndicator size="small" color="#fff" />
-                <Text style={styles.taskPillText}>{taskLabel}</Text>
-                <Icon name="stop" size={12} color="#fff" />
-              </Pressable>
-            ) : null}
           </View>
           <View style={styles.inputRow}>
             <TextInput
@@ -823,14 +851,15 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
           </View>
         </View>
       </KeyboardAvoidingView>
+      ) : null}
 
       {/* Sheets */}
-      {/* 消息图片预览（H5 式引用：大图 + 出处 + 设为画布） */}
+      {/* 图片预览：消息图片与画布图片共用（大图 + 出处 + 保存/分享 + 设为画布） */}
       <Modal visible={!!preview} transparent animationType="fade" onRequestClose={() => setPreview(null)}>
         <View style={styles.previewOverlay}>
           <View style={styles.previewHeader}>
             <Text style={styles.previewTitle} numberOfLines={1}>
-              {preview?.message.content.versionNumber ? `V${preview.message.content.versionNumber} · 生成结果` : '图片预览'}
+              {preview?.message?.content.versionNumber ? `V${preview.message.content.versionNumber} · 生成结果` : preview?.message ? '图片预览' : '画布图片'}
             </Text>
             <Pressable onPress={() => setPreview(null)} hitSlop={8}>
               <Icon name="close" size={22} color="#fff" />
@@ -841,12 +870,20 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
           )}
           {preview && (
             <View style={styles.previewInfo}>
-              <Text style={styles.previewPrompt} numberOfLines={4}>
-                {preview.message.content.prompt || preview.message.content.text || '（无提示词）'}
-              </Text>
-              <Text style={styles.previewMeta}>
-                {[preview.message.content.modelName, preview.image.width ? `${preview.image.width}×${preview.image.height}` : ''].filter(Boolean).join(' · ')}
-              </Text>
+              {preview.message ? (
+                <>
+                  <Text style={styles.previewPrompt} numberOfLines={4}>
+                    {preview.message.content.prompt || preview.message.content.text || '（无提示词）'}
+                  </Text>
+                  <Text style={styles.previewMeta}>
+                    {[preview.message.content.modelName, preview.image.width ? `${preview.image.width}×${preview.image.height}` : ''].filter(Boolean).join(' · ')}
+                  </Text>
+                </>
+              ) : (
+                <Text style={styles.previewMeta}>
+                  {[preview.image.width ? `${preview.image.width}×${preview.image.height}` : '', '保存到手机相册或分享给他人'].filter(Boolean).join(' · ')}
+                </Text>
+              )}
               <View style={styles.previewActions}>
                 <Pressable style={styles.previewShareBtn} onPress={() => void sharePreview()}>
                   <Icon name="share" size={15} color={colors.accent} />
@@ -865,12 +902,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         </View>
       </Modal>
 
-      <ModalSheet visible={sheet === 'history'} title="历史版本" onClose={() => setSheet(null)}>
-        <HistoryModal
-          bundle={bundle}
-          onUseVersion={useVersion}
-          onDeleteVersion={deleteVersion}
-          onDownloadVersion={downloadVersionZip}
+      {/* 任务队列：独立面板，查看排队/进行中任务并支持取消与失败重试 */}
+      <ModalSheet visible={sheet === 'tasks'} title="任务队列" onClose={() => setSheet(null)}>
+        <TasksPanel
+          projectId={projectId}
+          activeTask={activeTask}
+          failedTask={failedTask}
+          onRetry={retryFailed}
+          onCancel={cancelTask}
         />
       </ModalSheet>
 
@@ -902,7 +941,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         )}
       </ModalSheet>
 
-      <ModalSheet visible={sheet === 'batch'} title="批量生成" onClose={() => setSheet(null)}>
+      <ModalSheet visible={sheet === 'batch'} title="批量创作" onClose={() => setSheet(null)}>
         <BatchModal
           projectId={projectId}
           imageModel={imageModel}
@@ -1044,6 +1083,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         <CropView
           visible
           uri={cropAsset.uri}
+          rotation={cropAsset.rotation}
           onCancel={() => setCropAsset(null)}
           onUseOriginal={handleCropDone}
           onConfirm={handleCropDone}
@@ -1058,6 +1098,160 @@ function imageMapOf(bundle: ProjectBundle): Map<string, ProjectImage> {
   for (const img of bundle.images) map.set(img.id, img);
   return map;
 }
+
+/** 数量下拉选择：替代占宽的四枚按钮，节省输入栏空间 */
+function CountSelect({ value, onChange, colors }: { value: number; onChange: (n: number) => void; colors: ReturnType<typeof useTheme>['colors'] }) {
+  const styles = countSelectStyles(colors);
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <Pressable style={styles.btn} onPress={() => setOpen(true)}>
+        <Text style={styles.text}>数量 ×{value}</Text>
+        <Icon name="chevronDown" size={13} color={colors.textSecondary} />
+      </Pressable>
+      <Modal transparent visible={open} animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.overlay} onPress={() => setOpen(false)}>
+          <View style={[styles.menu, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            {[1, 2, 3, 4].map((n) => (
+              <Pressable
+                key={n}
+                style={styles.item}
+                onPress={() => { onChange(n); setOpen(false); }}
+              >
+                <Text style={[styles.itemText, { color: n === value ? colors.accent : colors.text }]}>一次生成 {n} 张</Text>
+                {n === value ? <Icon name="check" size={14} color={colors.accent} /> : null}
+              </Pressable>
+            ))}
+          </View>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+const countSelectStyles = (c: ReturnType<typeof useTheme>['colors']) =>
+  StyleSheet.create({
+    btn: { flexDirection: 'row', alignItems: 'center', gap: 4, height: 30, paddingHorizontal: spacing.sm, borderRadius: radius.pill, backgroundColor: c.bg, borderWidth: 1, borderColor: c.border },
+    text: { fontSize: fontSize.sm, color: c.text },
+    overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', alignItems: 'center', justifyContent: 'center' },
+    menu: { width: 220, borderRadius: radius.md, borderWidth: 1, overflow: 'hidden' },
+    item: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
+    itemText: { fontSize: fontSize.sm },
+  });
+
+/** 任务操作的中文名（与桌面端一致） */
+const OPERATION_LABELS: Record<string, string> = {
+  generate: '生成',
+  local_edit: '局部编辑',
+  local_edit_batch: '批量局部编辑',
+  outpaint: '扩图',
+  enhance: '清晰度提升',
+  remove_watermark: '去水印',
+  extract_asset: '提取素材',
+  edit_text: '图片改字',
+  batch_edit: '批量改图',
+  batch_generate: '批量文生图',
+  upload: '上传',
+};
+
+function formatTaskTime(iso: string | null): string {
+  if (!iso) return '';
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return '';
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 任务队列面板：排队/进行中/失败任务一目了然，支持取消与失败重试 */
+function TasksPanel({ projectId, activeTask, failedTask, onRetry, onCancel }: {
+  projectId: string;
+  activeTask: GenerationTask | null;
+  failedTask: { error: string | null; retryable: boolean } | null;
+  onRetry: () => void;
+  onCancel: () => void;
+}) {
+  const { colors } = useTheme();
+  const styles = tasksPanelStyles(colors);
+  const [tasks, setTasks] = useState<GenerationTask[]>([]);
+  const [loaded, setLoaded] = useState(false);
+
+  const refresh = useCallback(async () => {
+    try {
+      const data = await api.listGeneratingTasks(projectId);
+      setTasks(data.tasks);
+    } catch { /* 静默重试 */ } finally {
+      setLoaded(true);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 2000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  const rows = tasks.length ? tasks : activeTask ? [activeTask] : [];
+
+  return (
+    <View style={styles.container}>
+      {failedTask ? (
+        <View style={[styles.row, styles.failedRow]}>
+          <View style={styles.rowMain}>
+            <Text style={[styles.rowTitle, { color: colors.danger }]}>上次任务失败</Text>
+            <Text style={[styles.rowSub, { color: colors.danger }]} numberOfLines={2}>{failedTask.error || '任务失败'}</Text>
+          </View>
+          {failedTask.retryable ? (
+            <Pressable style={[styles.actionBtn, { backgroundColor: colors.danger }]} onPress={onRetry}>
+              <Text style={styles.actionText}>重试</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+
+      {rows.map((task) => (
+        <View key={task.id} style={styles.row}>
+          <View style={styles.rowMain}>
+            <Text style={styles.rowTitle}>
+              {OPERATION_LABELS[task.operationType || ''] || task.operationType || '任务'}
+              {task.status === 'queued' ? ' · 排队中' : ' · 进行中'}
+            </Text>
+            <Text style={styles.rowSub}>
+              {task.status === 'queued' && task.queuePosition ? `当前第 ${task.queuePosition} 位 · ` : ''}
+              {task.status === 'generating' && task.stage ? `${STAGE_LABELS[task.stage] || '生成中'} · ` : ''}
+              提交于 {formatTaskTime(task.createdAt) || '—'}
+            </Text>
+          </View>
+          <Pressable style={[styles.actionBtn, { backgroundColor: colors.border }]} onPress={onCancel}>
+            <Icon name="stop" size={13} color={colors.textSecondary} />
+            <Text style={[styles.actionText, { color: colors.textSecondary }]}>取消</Text>
+          </Pressable>
+        </View>
+      ))}
+
+      {!rows.length && !failedTask && loaded ? (
+        <View style={styles.empty}>
+          <Icon name="check" size={28} color={colors.border} />
+          <Text style={styles.emptyText}>当前没有进行中的任务</Text>
+          <Text style={styles.emptySub}>生成中的任务会出现在这里；已完成的图片请到「历史」页查看</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+const tasksPanelStyles = (c: ReturnType<typeof useTheme>['colors']) =>
+  StyleSheet.create({
+    container: { padding: spacing.md, gap: spacing.sm, minHeight: 180 },
+    row: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: c.border, backgroundColor: c.card },
+    failedRow: { borderColor: `${c.danger}55`, backgroundColor: `${c.danger}0d` },
+    rowMain: { flex: 1, gap: 2 },
+    rowTitle: { fontSize: fontSize.sm, fontWeight: '700', color: c.text },
+    rowSub: { fontSize: fontSize.xs, color: c.muted },
+    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, height: 32, paddingHorizontal: spacing.sm, borderRadius: radius.sm },
+    actionText: { color: '#fff', fontSize: fontSize.xs, fontWeight: '700' },
+    empty: { alignItems: 'center', gap: spacing.xs, paddingVertical: spacing.xl },
+    emptyText: { fontSize: fontSize.sm, color: c.textSecondary, fontWeight: '600' },
+    emptySub: { fontSize: fontSize.xs, color: c.muted, textAlign: 'center', paddingHorizontal: spacing.xl, lineHeight: 18 },
+  });
 
 function ToolBtn({ icon, label, colors, onPress, disabled, active }: { icon: string; label: string; colors: ReturnType<typeof useTheme>['colors']; onPress: () => void; disabled?: boolean; active?: boolean }) {
   return (
@@ -1151,13 +1345,9 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     tabDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#fff' },
     chatList: { flex: 1, backgroundColor: c.bg },
     chatListContent: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.lg },
+    historyPage: { flex: 1, backgroundColor: c.bg },
     countRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingBottom: spacing.sm },
-    countLabel: { fontSize: fontSize.sm, color: c.muted },
-    countBtn: { width: 30, height: 26, borderRadius: radius.sm, backgroundColor: c.bg, borderWidth: 1, borderColor: c.border, alignItems: 'center', justifyContent: 'center' },
-    countBtnActive: { backgroundColor: c.accent, borderColor: c.accent },
-    countText: { fontSize: fontSize.sm, color: c.textSecondary },
-    countTextActive: { color: '#fff', fontWeight: '700' },
-    taskPill: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: c.accent, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 4, marginLeft: 'auto' },
+    taskPill: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: c.accent, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 4, maxWidth: 132 },
     taskPillText: { color: '#fff', fontSize: fontSize.xs },
     batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
     batchPillText: { color: c.accent, fontSize: fontSize.xs, fontWeight: '700' },

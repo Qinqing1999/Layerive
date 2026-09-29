@@ -183,6 +183,9 @@ export function BatchModal({ projectId, imageModel, hasCanvasImage, notify, onFi
   return (
     <View style={styles.container}>
       <View style={styles.section}>
+        <Text style={styles.explain}>
+          一次提交多条提示词、按顺序排队生成一组图片（2–50 张）。两种玩法：以画布图片为底的「批量改图」，或从零生成的「批量文生图」；内容可以用「变量模板」批量套壳，或直接粘贴「提示词列表」。
+        </Text>
         <View style={styles.segRow}>
           <Pressable style={[styles.segBtn, mode === 'edit' && styles.segActive, !canEdit && { opacity: 0.4 }]} onPress={() => canEdit && setMode('edit')}>
             <Text style={[styles.segText, mode === 'edit' && styles.segTextActive]}>批量改图</Text>
@@ -279,6 +282,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({
     container: { flex: 1 },
     section: { paddingHorizontal: spacing.md, paddingTop: spacing.md, gap: spacing.sm },
+    explain: { fontSize: fontSize.xs, color: c.muted, lineHeight: 18 },
     segRow: { flexDirection: 'row', gap: spacing.sm },
     segBtn: { flex: 1, height: 40, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, backgroundColor: c.card, alignItems: 'center', justifyContent: 'center' },
     segBtnSmall: { flex: 1, height: 34, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, backgroundColor: c.card, alignItems: 'center', justifyContent: 'center' },

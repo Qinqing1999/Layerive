@@ -1,18 +1,15 @@
 {
+  "extends": "expo/tsconfig.base",
   "compilerOptions": {
-    "target": "ESNext",
-    "module": "commonjs",
-    "jsx": "react-native",
     "strict": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "resolveJsonModule": true,
-    "noEmit": true,
     "baseUrl": ".",
     "paths": {
       "@/*": ["src/*"]
     }
   },
-  "include": ["src/**/*", "index.ts", "app.json"],
-  "exclude": ["node_modules"]
+  "include": [
+    "src/**/*",
+    "index.ts",
+    "app.json"
+  ]
 }
