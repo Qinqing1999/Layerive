@@ -666,8 +666,9 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       const handle = dragRect ? hitTest(p, dragRect) : 'create';
       dragHandleRef.current = handle;
       rectBeforeDragRef.current = dragRect ? { ...dragRect } : null;
+      // 所有模式都需要记录起始点（move 依赖它计算位移，resize 依赖它判断方向）
+      dragStartRef.current = p;
       if (handle === 'create') {
-        dragStartRef.current = p;
         setDragRect({ x: p.x, y: p.y, width: 0, height: 0 });
       }
     },
@@ -846,7 +847,15 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
               ? { position: 'absolute', left: imageDisplay.left, top: imageDisplay.top, width: imageDisplay.w, height: imageDisplay.h }
               : styles.canvasImage}
             disabled={Boolean(selectMode)}
-            onPress={() => setPreview({ image: currentImage })}
+            onPress={() => {
+              if (selectMode) return;
+              Alert.alert('画布图片', '当前图片', [
+                { text: '保存 / 分享', onPress: () => void sharePreview() },
+                { text: '设为当前图片（继续修改）', onPress: () => { useAsCurrent(currentImage); setBottomTab('chat'); } },
+                { text: '查看大图', onPress: () => setPreview({ image: currentImage }) },
+                { text: '取消', style: 'cancel' },
+              ]);
+            }}
           >
             <Image
               source={imageSource(currentImage.url, 1280)}
