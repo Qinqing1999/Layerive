@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../theme';
 
@@ -22,7 +23,7 @@ type CropAsset = {
 type Props = {
   visible: boolean;
   uri: string;
-  /** 依据 EXIF 计算的顺时针旋转角度（Android 原生裁剪不自动烘焙 EXIF 方向，需先旋转再裁剪） */
+  /** 依据 EXIF 计算的顺时针旋转角度（Android 原生裁剪不自动烘焙 EXIF，需先旋转再裁剪） */
   rotation?: number;
   onCancel: () => void;
   onUseOriginal: (asset: CropAsset) => void;
@@ -37,6 +38,9 @@ const MIN_PERCENT = 2;
 /**
  * 上传裁剪：与工作台「局部」框选同款交互——
  * 在图片上拖拽画出选区（松手保持，可重新拖拽改选），确认后按选区裁剪导入。
+ *
+ * 关键：进入裁剪前先烘焙 EXIF 旋转，得到 normalized uri，
+ * 后续显示和裁剪都基于 normalized 尺寸，避免坐标空间不一致。
  */
 export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, onConfirm }: Props) {
   const { colors } = useTheme();
@@ -46,25 +50,63 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
   const [box, setBox] = useState({ w: 0, h: 0 });
   const [dragRect, setDragRect] = useState<DragRect | null>(null);
   const [busy, setBusy] = useState(false);
+  const [normalizing, setNormalizing] = useState(false);
+  // 烘焙 EXIF 后的 uri（已旋转到正确方向，后续显示和裁剪都基于它）
+  const [normalizedUri, setNormalizedUri] = useState<string | null>(null);
+  const normalizedUriRef = useRef<string | null>(null);
+  normalizedUriRef.current = normalizedUri;
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   const containerRef = useRef<View | null>(null);
   const originRef = useRef({ x: 0, y: 0 });
   // 手势回调经 ref 读取最新显示区，保证 PanResponder 只创建一次（拖动中不替换 panHandlers）
   const displayRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
 
+  // 进入裁剪界面时先烘焙 EXIF，得到 normalized uri
+  // 这样 <Image> 显示的尺寸和 ImageManipulator 裁剪的尺寸就一致了
   useEffect(() => {
     if (!visible) return;
     setDragRect(null);
+    setImgSize(null);
+    setNormalizedUri(null);
     let alive = true;
-    Image.getSize(
-      uri,
-      (w, h) => alive && setImgSize({ w, h }),
-      () => alive && setImgSize({ w: 1000, h: 1000 })
-    );
+
+    (async () => {
+      let workUri = uri;
+      if (rotation) {
+        setNormalizing(true);
+        try {
+          const out = await ImageManipulator.manipulateAsync(
+            uri,
+            [{ rotate: rotation }],
+            { compress: 1, format: ImageManipulator.SaveFormat.JPEG }
+          );
+          if (!alive) return;
+          workUri = out.uri;
+        } catch {
+          // 烘焙失败则退回原图（显示可能不对但至少不崩溃）
+        } finally {
+          if (alive) setNormalizing(false);
+        }
+      }
+      if (!alive) return;
+      setNormalizedUri(workUri);
+      Image.getSize(
+        workUri,
+        (w, h) => alive && setImgSize({ w, h }),
+        () => alive && setImgSize({ w: 1000, h: 1000 })
+      );
+    })();
+
     return () => {
       alive = false;
+      // 清理临时文件
+      const tmpUri = normalizedUriRef.current;
+      if (tmpUri && tmpUri !== uri) {
+        FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
+      }
     };
-  }, [visible, uri]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible, uri, rotation]);
 
   // contain 适配后的图片显示区（相对容器），与「局部」的 imageDisplay 同一算法
   const display = useMemo(() => {
@@ -130,21 +172,17 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
   const valid = !!percent && percent.w >= MIN_PERCENT && percent.h >= MIN_PERCENT;
 
   async function confirmCrop() {
-    if (!imgSize || !display || !dragRect || !valid || busy) return;
+    if (!imgSize || !display || !dragRect || !valid || busy || !normalizedUri) return;
     setBusy(true);
     try {
+      // normalizedUri 已经烘焙过 EXIF，直接按显示坐标映射裁剪即可
       const cropX = Math.round(((dragRect.x - display.x) / display.w) * imgSize.w);
       const cropY = Math.round(((dragRect.y - display.y) / display.h) * imgSize.h);
       const cropW = Math.max(1, Math.round((dragRect.width / display.w) * imgSize.w));
       const cropH = Math.max(1, Math.round((dragRect.height / display.h) * imgSize.h));
-      // Android 原生裁剪不烘焙 EXIF：显示时已按 EXIF 转向，先旋转到显示方向再裁剪，
-      // 否则带 EXIF 的照片裁出来区域和看到的不一致
-      const actions: ImageManipulator.Action[] = [];
-      if (rotation) actions.push({ rotate: rotation });
-      actions.push({ crop: { originX: cropX, originY: cropY, width: cropW, height: cropH } });
       const out = await ImageManipulator.manipulateAsync(
-        uri,
-        actions,
+        normalizedUri,
+        [{ crop: { originX: cropX, originY: cropY, width: cropW, height: cropH } }],
         { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG, base64: true }
       );
       if (!out.base64) throw new Error('裁剪失败，请重试');
@@ -155,6 +193,8 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
       setBusy(false);
     }
   }
+
+  const showUri = normalizedUri || uri;
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
@@ -169,10 +209,15 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
 
         <View style={styles.canvas}>
           <View ref={containerRef} style={styles.canvasInner} onLayout={handleLayout} {...pan.panHandlers}>
-            {display && (
+            {normalizing ? (
+              <View style={styles.loadingWrap}>
+                <ActivityIndicator size="large" color={colors.accent} />
+                <Text style={styles.loadingText}>正在处理图片…</Text>
+              </View>
+            ) : display && showUri ? (
               <>
                 <Image
-                  source={{ uri }}
+                  source={{ uri: showUri }}
                   style={{
                     position: 'absolute',
                     left: display.x,
@@ -197,7 +242,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
                   </View>
                 ) : null}
               </>
-            )}
+            ) : null}
           </View>
         </View>
 
@@ -245,6 +290,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     headerTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
     canvas: { flex: 1, paddingHorizontal: 32 },
     canvasInner: { flex: 1 },
+    loadingWrap: { flex: 1, alignItems: 'center', justifyContent: 'center' },
+    loadingText: { color: 'rgba(255,255,255,0.6)', fontSize: 13, marginTop: 8 },
     maskLayer: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 },
     cornerDot: {
       position: 'absolute',
