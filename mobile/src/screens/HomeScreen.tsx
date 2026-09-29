@@ -15,6 +15,7 @@ import {
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, backupPath, downloadToCache, exportProjectPath, imageSource, thumbUrl } from '../api';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
@@ -36,6 +37,7 @@ const formatUpdated = (value: string) =>
 
 export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onLogout, notify }: Props) {
   const { colors, mode, toggle } = useTheme();
+  const insets = useSafeAreaInsets();
   const styles = makeStyles(colors);
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState('');
@@ -180,7 +182,7 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top, backgroundColor: colors.card }]}>
       {/* Header */}
       <View style={styles.header}>
         <View style={styles.brand}>

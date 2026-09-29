@@ -832,7 +832,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     : '';
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
+    <View style={[styles.container, { paddingTop: insets.top, backgroundColor: colors.card }]}>
       {/* Top bar */}
       <View style={styles.topbar}>
         <Pressable onPress={onBack} hitSlop={8} style={styles.topbarBtn}>
@@ -850,24 +850,22 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         <Pressable onPress={() => setSheet('gallery')} hitSlop={8} style={styles.topbarBtn}>
           <Icon name="gallery" size={18} color={colors.text} />
         </Pressable>
-        <Pressable onPress={pickImage} hitSlop={8} style={styles.topbarBtn} disabled={uploading}>
-          {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={18} color={colors.text} />}
-        </Pressable>
-        <Pressable onPress={pickCamera} hitSlop={8} style={styles.topbarBtn} disabled={uploading}>
-          <Icon name="camera" size={18} color={colors.text} />
-        </Pressable>
       </View>
 
-      {/* 保存按钮栏（仅在画布页且当前有图片时显示） */}
-      {bottomTab === 'canvas' && currentImage && (
-        <View style={styles.saveBar}>
-          <Pressable
-            onPress={() => void saveCurrentImage()}
-            style={[styles.saveBtn, !currentImage && styles.saveBtnDisabled]}
-            disabled={!currentImage}
-          >
+      {/* 画布操作栏：上传 / 相机 / 保存（仅画布页显示） */}
+      {bottomTab === 'canvas' && (
+        <View style={styles.actionBar}>
+          <Pressable onPress={pickImage} style={styles.actionBtn} disabled={uploading}>
+            {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={16} color={colors.text} />}
+            <Text style={styles.actionText}>上传</Text>
+          </Pressable>
+          <Pressable onPress={pickCamera} style={styles.actionBtn} disabled={uploading}>
+            <Icon name="camera" size={16} color={colors.text} />
+            <Text style={styles.actionText}>拍照</Text>
+          </Pressable>
+          <Pressable onPress={() => void saveCurrentImage()} style={[styles.actionBtn, !currentImage && styles.actionBtnDisabled]} disabled={!currentImage}>
             <Icon name="download" size={16} color={colors.text} />
-            <Text style={styles.saveBtnText}>保存到相册</Text>
+            <Text style={styles.actionText}>保存</Text>
           </Pressable>
         </View>
       )}
@@ -1009,7 +1007,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       ) : null}
 
       {/* 底部导航：画布 / 对话 / 历史 */}
-      <View style={styles.tabBar}>
+      <View style={[styles.tabBar, { paddingBottom: (insets.bottom || 0) + spacing.sm }]}>
         <Pressable style={[styles.tabBtn, bottomTab === 'canvas' && styles.tabBtnActive]} onPress={() => setBottomTab('canvas')}>
           <Icon name="image" size={16} color={bottomTab === 'canvas' ? '#fff' : colors.textSecondary} />
           <Text style={[styles.tabText, bottomTab === 'canvas' && styles.tabTextActive]}>画布</Text>
@@ -1029,7 +1027,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       {/* 输入栏：仅对话页显示，避免与画布页重复 */}
       {bottomTab === 'chat' ? (
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={styles.inputBar}>
+        <View style={[styles.inputBar, { paddingBottom: (insets.bottom || 0) + spacing.md }]}>
           {currentImage ? (
             <View style={styles.canvasHint}>
               {imageSource(currentImage.url, 128) ? (
@@ -1589,6 +1587,10 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     saveBtn: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.sm, backgroundColor: c.accentLight, borderWidth: 1, borderColor: c.accent },
     saveBtnDisabled: { opacity: 0.5 },
     saveBtnText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
+    actionBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
+    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.bg, borderWidth: 1, borderColor: c.border },
+    actionBtnDisabled: { opacity: 0.4 },
+    actionText: { fontSize: fontSize.xs, color: c.textSecondary, fontWeight: '500' },
     batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
     batchPillText: { color: c.accent, fontSize: fontSize.xs, fontWeight: '700' },
     previewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', paddingTop: 50, paddingBottom: 30 },
