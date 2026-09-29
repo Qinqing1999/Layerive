@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../theme';
 
 type CropAsset = {
@@ -39,6 +40,7 @@ const MIN_PERCENT = 2;
  */
 export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, onConfirm }: Props) {
   const { colors } = useTheme();
+  const insets = useSafeAreaInsets();
   const styles = makeStyles(colors);
   const [imgSize, setImgSize] = useState<{ w: number; h: number } | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
@@ -156,7 +158,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
 
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onCancel}>
-      <View style={styles.screen}>
+      <View style={[styles.screen, { paddingTop: insets.top }]}>
         <View style={styles.header}>
           <Pressable onPress={onCancel} hitSlop={8} disabled={busy}>
             <Text style={styles.headerBtn}>取消</Text>
@@ -199,7 +201,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
           </View>
         </View>
 
-        <View style={styles.footer}>
+        <View style={[styles.footer, { paddingBottom: 28 + (insets.bottom || 0) }]}>
           <Pressable
             style={[styles.footerBtn, { backgroundColor: 'transparent' }]}
             onPress={() => onUseOriginal({ data: '', mimeType: '', name: '' })}

@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, getServerBase, setAuthToken, setServerBase } from '../api';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
@@ -12,6 +13,7 @@ type Props = {
 export function LoginScreen({ onSuccess, notify }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
+  const insets = useSafeAreaInsets();
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [server, setServer] = useState(getServerBase());
@@ -35,7 +37,7 @@ export function LoginScreen({ onSuccess, notify }: Props) {
   }
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
       <View style={styles.card}>
         <View style={styles.brand}>
           <View style={styles.logo}><Text style={styles.logoText}>P</Text></View>
@@ -82,7 +84,7 @@ export function LoginScreen({ onSuccess, notify }: Props) {
 
 const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({
-    container: { flex: 1, backgroundColor: c.bg, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
+    container: { flex: 1, backgroundColor: c.card, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
     card: { width: '100%', maxWidth: 360, backgroundColor: c.card, borderRadius: radius.lg, padding: spacing.xl, elevation: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 10 }, shadowOpacity: 0.1, shadowRadius: 20 },
     brand: { alignItems: 'center', marginBottom: spacing.xl },
     logo: { width: 52, height: 52, borderRadius: 14, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.md },

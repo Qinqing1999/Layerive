@@ -816,7 +816,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
 
   if (loading || !bundle) {
     return (
-      <View style={styles.loading}>
+      <View style={[styles.loading, { paddingTop: insets.top, backgroundColor: colors.card }]}>
         <ActivityIndicator size="large" color={colors.accent} />
         {busyLabel ? <Text style={styles.loadingText}>{busyLabel}</Text> : <Text style={styles.loadingText}>加载中…</Text>}
       </View>
@@ -1075,7 +1075,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       {/* Sheets */}
       {/* 图片预览：消息图片与画布图片共用（大图 + 出处 + 保存/分享 + 设为画布） */}
       <Modal visible={!!preview} transparent animationType="fade" onRequestClose={() => setPreview(null)}>
-        <View style={styles.previewOverlay}>
+        <View style={[styles.previewOverlay, { paddingTop: insets.top + 10, paddingBottom: insets.bottom + 10 }]}>
           <View style={styles.previewHeader}>
             <Text style={styles.previewTitle} numberOfLines={1}>
               {preview?.message?.content.versionNumber ? `V${preview.message.content.versionNumber} · 生成结果` : preview?.message ? '图片预览' : '画布图片'}
@@ -1538,7 +1538,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     container: { flex: 1, backgroundColor: c.bg },
     loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: c.bg },
     loadingText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted },
-    topbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.lg, paddingBottom: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border, gap: spacing.sm },
+    topbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border, gap: spacing.sm },
     topbarBtn: { padding: spacing.sm },
     topbarTitle: { flex: 1, textAlign: 'center', fontSize: fontSize.md, fontWeight: '700', color: c.text, marginHorizontal: spacing.sm },
     canvasArea: { flex: 1, backgroundColor: c.canvasBg, overflow: 'hidden' },
@@ -1588,7 +1588,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     saveBtnDisabled: { opacity: 0.5 },
     saveBtnText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
     actionBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
-    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.bg, borderWidth: 1, borderColor: c.border },
+    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
     actionBtnDisabled: { opacity: 0.4 },
     actionText: { fontSize: fontSize.xs, color: c.textSecondary, fontWeight: '500' },
     batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },

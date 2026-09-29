@@ -251,7 +251,7 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
           numColumns={2}
           columnWrapperStyle={{ gap: spacing.md }}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefreshData} tintColor={colors.accent} />}
-          contentContainerStyle={styles.listContent}
+          contentContainerStyle={[styles.listContent, { paddingBottom: (insets.bottom || 0) + spacing.xxl }]}
           renderItem={({ item }: { item: Project }) => (
             <ProjectCard
               item={item}
@@ -408,8 +408,8 @@ const menuStyles = StyleSheet.create({
 
 const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({
-    container: { flex: 1, backgroundColor: c.bg },
-    header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.lg, paddingTop: spacing.lg, paddingBottom: spacing.md, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
+    container: { flex: 1, backgroundColor: c.card },
+    header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.lg, paddingTop: spacing.sm, paddingBottom: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
     brand: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
     logo: { width: 34, height: 34, borderRadius: 10, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
     logoText: { color: '#fff', fontSize: fontSize.md, fontWeight: '800' },

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler } from './api';
@@ -103,16 +103,16 @@ function AppShell() {
 
   if (authState === 'guest') {
     return (
-      <SafeAreaView style={styles.safeArea}>
+      <View style={styles.root}>
         <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
         <LoginScreen onSuccess={onLoginSuccess} notify={notify} />
         {toast && <ToastView toast={toast} colors={colors} />}
-      </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.safeArea}>
+    <View style={styles.root}>
       <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
       {view.name === 'home' && (
         <HomeScreen
@@ -136,7 +136,7 @@ function AppShell() {
         />
       )}
       {toast && <ToastView toast={toast} colors={colors} />}
-    </SafeAreaView>
+    </View>
   );
 }
 
@@ -161,7 +161,7 @@ function ToastView({ toast, colors }: { toast: Toast; colors: ReturnType<typeof 
 
 const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({
-    safeArea: { flex: 1, backgroundColor: c.bg },
+    root: { flex: 1, backgroundColor: c.card },
   });
 
 const toastStyles = StyleSheet.create({
