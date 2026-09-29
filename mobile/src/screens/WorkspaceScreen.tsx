@@ -18,8 +18,9 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } from '../api';
+import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath, authHeaders } from '../api';
 import { outpaintPresets } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
@@ -602,6 +603,30 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     }
   }
 
+  /** 直接保存到手机相册/下载文件夹 */
+  async function saveCurrentImage() {
+    if (!currentImage) { notify('没有当前图片', 'error'); return; }
+    const fullUrl = resolveUrl(currentImage.url);
+    if (!fullUrl) { notify('图片地址无效', 'error'); return; }
+    const ext = /\.png($|\?)/i.test(fullUrl) ? 'png' : /\.webp($|\?)/i.test(fullUrl) ? 'webp' : 'jpg';
+    try {
+      setBusyLabel('正在保存…');
+      const uri = await downloadToCache(fullUrl, `layerive-${currentImage.id}.${ext}`);
+      setBusyLabel('');
+      if (await Sharing.isAvailableAsync()) {
+        const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+        await Sharing.shareAsync(uri, { mimeType, dialogTitle: '保存到相册' });
+        notify('已保存到相册');
+      } else {
+        notify('系统分享不可用，请重试', 'error');
+      }
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setBusyLabel('');
+    }
+  }
+
   /** 收藏当前预览图片到画廊 */
   async function favoriteToGallery() {
     if (!preview) return;
@@ -817,13 +842,21 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         <Pressable onPress={pickCamera} hitSlop={8} style={styles.topbarBtn} disabled={uploading}>
           <Icon name="camera" size={18} color={colors.text} />
         </Pressable>
-        <Pressable onPress={() => void sharePreview()} hitSlop={8} style={styles.topbarBtn} disabled={!currentImage}>
-          <Icon name="download" size={18} color={colors.text} />
-        </Pressable>
-        <Pressable onPress={() => setBottomTab('history')} hitSlop={8} style={styles.topbarBtn} disabled={!currentImage}>
-          <Icon name="history" size={18} color={colors.text} />
-        </Pressable>
       </View>
+
+      {/* 保存按钮栏（仅在画布页且当前有图片时显示） */}
+      {bottomTab === 'canvas' && currentImage && (
+        <View style={styles.saveBar}>
+          <Pressable
+            onPress={() => void saveCurrentImage()}
+            style={[styles.saveBtn, !currentImage && styles.saveBtnDisabled]}
+            disabled={!currentImage}
+          >
+            <Icon name="download" size={16} color={colors.text} />
+            <Text style={styles.saveBtnText}>保存到相册</Text>
+          </Pressable>
+        </View>
+      )}
 
       {/* 历史版本独立页面 */}
       {bottomTab === 'history' ? (
@@ -1493,8 +1526,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     container: { flex: 1, backgroundColor: c.bg },
     loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: c.bg },
     loadingText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted },
-    topbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.lg, paddingBottom: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
-    topbarBtn: { padding: spacing.xs },
+    topbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.lg, paddingBottom: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border, gap: spacing.sm },
+    topbarBtn: { padding: spacing.sm },
     topbarTitle: { flex: 1, textAlign: 'center', fontSize: fontSize.md, fontWeight: '700', color: c.text, marginHorizontal: spacing.sm },
     canvasArea: { flex: 1, backgroundColor: c.canvasBg, overflow: 'hidden' },
     canvasWrap: { flex: 1, alignSelf: 'stretch' },
@@ -1538,6 +1571,10 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     canvasHintMeta: { fontSize: fontSize.xs, color: c.muted },
     taskPill: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: c.accent, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 4, maxWidth: 132 },
     taskPillText: { color: '#fff', fontSize: fontSize.xs },
+    saveBar: { flexDirection: 'row', justifyContent: 'flex-end', paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
+    saveBtn: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.sm, backgroundColor: c.accentLight, borderWidth: 1, borderColor: c.accent },
+    saveBtnDisabled: { opacity: 0.5 },
+    saveBtnText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
     batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
     batchPillText: { color: c.accent, fontSize: fontSize.xs, fontWeight: '700' },
     previewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', paddingTop: 50, paddingBottom: 30 },
