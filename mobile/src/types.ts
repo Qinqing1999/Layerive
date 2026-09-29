@@ -104,6 +104,8 @@ export type GenerationTask = {
   error: string | null;
   createdAt: string;
   finishedAt: string | null;
+  /** 排队中的全局位次（从 1 开始），非排队状态为 null */
+  queuePosition?: number | null;
 };
 
 export type GenerateResult = { taskId: string; status: string; userMessageId: string };

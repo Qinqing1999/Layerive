@@ -5,6 +5,8 @@ import {
   FlatList,
   Image,
   KeyboardAvoidingView,
+  Modal,
+  PanResponder,
   Platform,
   Pressable,
   ScrollView,
@@ -16,14 +18,15 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Sharing from 'expo-sharing';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } from '../api';
 import { outpaintPresets } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
 import type { GenerationTask, Message, ModelConfig, ProjectBundle, ProjectImage, Version } from '../types';
 import { Icon } from '../components/Icon';
+import { CropView } from '../components/CropView';
 import { ModalSheet } from '../components/ModalSheet';
-import { RectSelector, type PercentRect } from '../components/RectSelector';
 import { HistoryModal } from './workspace/HistoryModal';
 import { CompareModal } from './workspace/CompareModal';
 import { EditTextModal } from './workspace/EditTextModal';
@@ -40,6 +43,13 @@ type Props = {
 };
 
 type SheetName = 'history' | 'compare' | 'editText' | 'batch' | 'gallery' | 'localEdit' | 'outpaint' | 'extractHint' | null;
+type SelectMode = 'localEdit' | 'extract' | null;
+
+/** 图片百分比坐标（与服务端 rect 字段一致） */
+type PercentRect = { x: number; y: number; width: number; height: number };
+
+/** 画布内拖拽产生的显示坐标矩形 */
+type DragRect = { x: number; y: number; width: number; height: number };
 
 const STAGE_LABELS: Record<string, string> = {
   planning: '视觉定位中…',
@@ -50,6 +60,11 @@ const STAGE_LABELS: Record<string, string> = {
 
 const OUTPAINT_HINT = '原图比例优先（向四周自然补全），也可选择主流画布比例';
 
+const SELECT_HINTS: Record<'localEdit' | 'extract', string> = {
+  localEdit: '在图片上拖拽框选要修改的区域',
+  extract: '圈选想提取的主体（允许带少量背景）',
+};
+
 export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
@@ -59,18 +74,33 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
   const [generating, setGenerating] = useState(false);
   const [activeTask, setActiveTask] = useState<GenerationTask | null>(null);
   const [bottomTab, setBottomTab] = useState<'canvas' | 'chat'>('canvas');
+  const insets = useSafeAreaInsets();
+  const [preview, setPreview] = useState<{ image: ProjectImage; message: Message } | null>(null);
   const [count, setCount] = useState(1);
   const [uploading, setUploading] = useState(false);
+  const [cropAsset, setCropAsset] = useState<{ uri: string; data: string; mimeType: string; name: string; use: 'upload' | 'reference' } | null>(null);
   const [parentVersionId, setParentVersionId] = useState<string | null>(null);
   const [sheet, setSheet] = useState<SheetName>(null);
-  const [selectMode, setSelectMode] = useState<'localEdit' | 'extract' | null>(null);
+  const [selectMode, setSelectMode] = useState<SelectMode>(null);
   const [selectedRect, setSelectedRect] = useState<PercentRect | null>(null);
+  const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
+  const canvasWrapRef = useRef<View | null>(null);
+  const canvasOriginRef = useRef({ x: 0, y: 0 });
+  /** 触摸事件 → 画布容器内坐标（pageX 全局稳定，不受 Android 子 View locationX 跳变影响） */
+  function canvasPoint(evt: { nativeEvent: { pageX: number; pageY: number } }) {
+    return {
+      x: evt.nativeEvent.pageX - canvasOriginRef.current.x,
+      y: evt.nativeEvent.pageY - canvasOriginRef.current.y,
+    };
+  }
+  const [dragRect, setDragRect] = useState<DragRect | null>(null);
   const [localInstruction, setLocalInstruction] = useState('');
   const [localReference, setLocalReference] = useState<{ data: string; mimeType: string; name?: string } | null>(null);
   const [extractHint, setExtractHint] = useState('');
   const [extractBusy, setExtractBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const dragStartRef = useRef<{ x: number; y: number } | null>(null);
 
   const currentImage = useMemo(
     () => bundle?.images.find((img) => img.id === bundle.project.currentImageId) || null,
@@ -116,6 +146,29 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
 
   useEffect(() => { void loadBundle(); }, [loadBundle]);
 
+  // 进入工作台（或 App 重启后重进）恢复进行中/排队中的任务，让队列显示与轮询接上
+  useEffect(() => {
+    if (!bundle) return;
+    let alive = true;
+    (async () => {
+      try {
+        const { tasks } = await api.listGeneratingTasks(projectId);
+        if (!alive || !tasks.length) return;
+        const newest = tasks[0];
+        setActiveTask((prev) => prev ?? {
+          id: newest.id,
+          status: newest.status,
+          operationType: newest.operationType,
+          stage: null,
+          error: null,
+          createdAt: newest.createdAt,
+          finishedAt: null,
+        });
+      } catch { /* ignore */ }
+    })();
+    return () => { alive = false; };
+  }, [bundle, projectId]);
+
   // Poll the running task until it leaves the queue / "generating".
   useEffect(() => {
     if (!bundle || !activeTask || (activeTask.status !== 'generating' && activeTask.status !== 'queued')) return;
@@ -132,6 +185,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
     }, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [activeTask, bundle, projectId, loadBundle]);
+
+  // 切换画布图片时退出框选模式
+  useEffect(() => {
+    setSelectMode(null);
+    setDragRect(null);
+  }, [currentImage?.id]);
 
   async function uploadImage(data: string, mimeType: string, name: string) {
     try {
@@ -154,13 +213,33 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       });
       const asset = result.assets?.[0];
       if (!asset?.base64) return;
-      const mimeType = asset.mimeType || 'image/jpeg';
-      setUploading(true);
-      await uploadImage(asset.base64, mimeType, asset.fileName || `photo-${Date.now()}.jpg`);
+      // 选图后先进入裁剪界面，由用户决定裁剪导入或使用原图
+      setCropAsset({
+        uri: asset.uri,
+        data: asset.base64,
+        mimeType: asset.mimeType || 'image/jpeg',
+        name: asset.fileName || `photo-${Date.now()}.jpg`,
+        use: 'upload',
+      });
     } catch (e) {
       notify((e as Error).message, 'error');
-    } finally {
-      setUploading(false);
+    }
+  }
+
+  /** 裁剪界面确认（含「使用原图」空 data 信号）：按用途上传画布或设为局部编辑参考图 */
+  function handleCropDone(asset: { data: string; mimeType: string; name: string }) {
+    const target = cropAsset;
+    setCropAsset(null);
+    if (!target) return;
+    const finalAsset = asset.data
+      ? asset
+      : { data: target.data, mimeType: target.mimeType, name: target.name };
+    if (target.use === 'upload') {
+      setUploading(true);
+      void uploadImage(finalAsset.data, finalAsset.mimeType, finalAsset.name).finally(() => setUploading(false));
+    } else {
+      setLocalReference(finalAsset);
+      notify('参考图已就绪');
     }
   }
 
@@ -169,7 +248,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.9, base64: true });
       const asset = result.assets?.[0];
       if (!asset?.base64) return;
-      setLocalReference({ data: asset.base64, mimeType: asset.mimeType || 'image/jpeg', name: asset.fileName || 'reference.jpg' });
+      // 参考图同样先进入裁剪界面，可编辑选择范围后再使用
+      setCropAsset({
+        uri: asset.uri,
+        data: asset.base64,
+        mimeType: asset.mimeType || 'image/jpeg',
+        name: asset.fileName || 'reference.jpg',
+        use: 'reference',
+      });
     } catch (e) {
       notify((e as Error).message, 'error');
     }
@@ -222,6 +308,27 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       await loadBundle();
       notify('已取消');
     } catch (e) { notify((e as Error).message, 'error'); }
+  }
+
+  /** 进入 / 退出画布框选模式（局部编辑 / 提取素材） */
+  function toggleSelectMode(mode: Exclude<SelectMode, null>) {
+    if (!currentImage) { notify('请先在画布中选择图片', 'error'); return; }
+    if (selectMode === mode) {
+      setSelectMode(null);
+      setDragRect(null);
+    } else {
+      setSelectMode(mode);
+      setDragRect(null);
+    }
+  }
+
+  function confirmSelection() {
+    if (!selectedRect) return;
+    const next = selectMode;
+    setSelectMode(null);
+    setDragRect(null);
+    if (next === 'localEdit') setSheet('localEdit');
+    if (next === 'extract') setSheet('extractHint');
   }
 
   function runSpecial(kind: 'enhance' | 'watermark') {
@@ -378,7 +485,82 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
     }
   }
 
-  const rectSelectorImage = selectMode ? currentImage : null;
+  // ---- 画布框选：图片在画布内的实际显示区域（aspectFit） ----
+  const imageDisplay = useMemo(() => {
+    const cw = canvasSize.w;
+    const ch = canvasSize.h;
+    if (!cw || !ch || !currentImage?.width || !currentImage?.height) return null;
+    const scale = Math.min(cw / currentImage.width, ch / currentImage.height);
+    const w = currentImage.width * scale;
+    const h = currentImage.height * scale;
+    return { left: (cw - w) / 2, top: (ch - h) / 2, w, h };
+  }, [canvasSize, currentImage?.width, currentImage?.height]);
+
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => Boolean(selectMode),
+    onMoveShouldSetPanResponder: () => Boolean(selectMode),
+    onPanResponderGrant: (evt) => {
+      if (!selectMode || !imageDisplay) return;
+      // Android 上 locationX 会随子 View 边界跳变，改用 pageX 减容器原点
+      const p = canvasPoint(evt);
+      dragStartRef.current = p;
+      setDragRect({ x: p.x, y: p.y, width: 0, height: 0 });
+    },
+    onPanResponderMove: (evt) => {
+      const start = dragStartRef.current;
+      if (!start || !imageDisplay || !selectMode) return;
+      const { x, y } = canvasPoint(evt);
+      const left = Math.max(imageDisplay.left, Math.min(start.x, x));
+      const right = Math.min(imageDisplay.left + imageDisplay.w, Math.max(start.x, x));
+      const top = Math.max(imageDisplay.top, Math.min(start.y, y));
+      const bottom = Math.min(imageDisplay.top + imageDisplay.h, Math.max(start.y, y));
+      setDragRect({ x: left, y: top, width: right - left, height: bottom - top });
+    },
+    onPanResponderRelease: () => { dragStartRef.current = null; },
+  }), [selectMode, imageDisplay]);
+
+  // 显示坐标 → 图片百分比坐标
+  const dragPercent = useMemo<PercentRect | null>(() => {
+    if (!dragRect || !imageDisplay || imageDisplay.w < 1 || imageDisplay.h < 1) return null;
+    const x = ((dragRect.x - imageDisplay.left) / imageDisplay.w) * 100;
+    const y = ((dragRect.y - imageDisplay.top) / imageDisplay.h) * 100;
+    return {
+      x: Math.max(0, Math.min(100, x)),
+      y: Math.max(0, Math.min(100, y)),
+      width: Math.max(0, Math.min(100 - Math.max(0, x), (dragRect.width / imageDisplay.w) * 100)),
+      height: Math.max(0, Math.min(100 - Math.max(0, y), (dragRect.height / imageDisplay.h) * 100)),
+    };
+  }, [dragRect, imageDisplay]);
+
+  const dragValid = !!dragPercent && dragPercent.width >= 2 && dragPercent.height >= 2;
+
+  // 拖拽结束后同步到 selectedRect，供「下一步」使用
+  useEffect(() => {
+    if (!selectMode) return;
+    if (dragPercent && dragValid) setSelectedRect(dragPercent);
+    if (!dragRect) setSelectedRect(null);
+  }, [dragPercent, dragValid, dragRect, selectMode]);
+
+  /** 选区外蒙版：上 / 下 / 左 / 右四块半透明遮罩 */
+  const renderCanvasMask = () => {
+    if (!selectMode || !dragRect || !imageDisplay) return null;
+    const { left: dLeft, top: dTop, w: dW, h: dH } = imageDisplay;
+    const maskColor = 'rgba(0,0,0,0.55)';
+    return (
+      <View pointerEvents="none" style={styles.maskLayer}>
+        <View style={{ position: 'absolute', left: dLeft, top: dTop, width: dW, height: Math.max(0, dragRect.y - dTop), backgroundColor: maskColor }} />
+        <View style={{ position: 'absolute', left: dLeft, top: dragRect.y + dragRect.height, width: dW, height: Math.max(0, (dTop + dH) - (dragRect.y + dragRect.height)), backgroundColor: maskColor }} />
+        <View style={{ position: 'absolute', left: dLeft, top: dragRect.y, width: Math.max(0, dragRect.x - dLeft), height: dragRect.height, backgroundColor: maskColor }} />
+        <View style={{ position: 'absolute', left: dragRect.x + dragRect.width, top: dragRect.y, width: Math.max(0, (dLeft + dW) - (dragRect.x + dragRect.width)), height: dragRect.height, backgroundColor: maskColor }} />
+        <View style={{ position: 'absolute', left: dragRect.x, top: dragRect.y, width: dragRect.width, height: dragRect.height, borderWidth: 2, borderColor: colors.accent, borderRadius: radius.sm }} />
+        {/* 四角指示点 */}
+        <View style={[styles.cornerDot, { left: dragRect.x - 4, top: dragRect.y - 4 }]} />
+        <View style={[styles.cornerDot, { left: dragRect.x + dragRect.width - 4, top: dragRect.y - 4 }]} />
+        <View style={[styles.cornerDot, { left: dragRect.x - 4, top: dragRect.y + dragRect.height - 4 }]} />
+        <View style={[styles.cornerDot, { left: dragRect.x + dragRect.width - 4, top: dragRect.y + dragRect.height - 4 }]} />
+      </View>
+    );
+  };
 
   if (loading || !bundle) {
     return (
@@ -391,12 +573,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
 
   const taskLabel = activeTask
     ? activeTask.status === 'queued'
-      ? '排队等待中…'
+      ? activeTask.queuePosition
+        ? `排队中 · 第 ${activeTask.queuePosition} 位`
+        : '排队等待中…'
       : (activeTask.stage && STAGE_LABELS[activeTask.stage]) || '生成中…'
     : '';
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Top bar */}
       <View style={styles.topbar}>
         <Pressable onPress={onBack} hitSlop={8} style={styles.topbarBtn}>
@@ -405,69 +589,133 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         <Text style={styles.topbarTitle} numberOfLines={1}>
           {bundle.project.name}{parentVersionId ? '（从历史继续）' : ''}
         </Text>
+        <Pressable onPress={() => setSheet('gallery')} hitSlop={8} style={styles.topbarBtn}>
+          <Icon name="gallery" size={18} color={colors.text} />
+        </Pressable>
         <Pressable onPress={pickImage} hitSlop={8} style={styles.topbarBtn} disabled={uploading}>
           {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={18} color={colors.text} />}
         </Pressable>
       </View>
 
-      {/* Bottom tabs */}
-      <View style={styles.tabBar}>
-        <Pressable style={[styles.tab, bottomTab === 'canvas' && styles.tabActive]} onPress={() => setBottomTab('canvas')}>
-          <Text style={[styles.tabText, bottomTab === 'canvas' && styles.tabTextActive]}>画布</Text>
-        </Pressable>
-        <Pressable style={[styles.tab, bottomTab === 'chat' && styles.tabActive]} onPress={() => setBottomTab('chat')}>
-          <Text style={[styles.tabText, bottomTab === 'chat' && styles.tabTextActive]}>对话</Text>
-        </Pressable>
+      {/* 画布页（框选蒙版直接叠加在画布上，工具栏为底部固定行不遮图） */}
+      {bottomTab === 'canvas' ? (
+      <View style={styles.canvasArea}>
+      <View
+        ref={canvasWrapRef}
+        style={styles.canvasWrap}
+        onLayout={(e) => {
+          setCanvasSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height });
+          canvasWrapRef.current?.measureInWindow((x, y) => { canvasOriginRef.current = { x, y }; });
+        }}
+        {...panResponder.panHandlers}
+      >
+        {currentImage ? (
+          <Image
+            source={imageSource(currentImage.url, 1280)}
+            style={imageDisplay
+              ? { position: 'absolute', left: imageDisplay.left, top: imageDisplay.top, width: imageDisplay.w, height: imageDisplay.h }
+              : styles.canvasImage}
+            resizeMode="stretch"
+          />
+        ) : (
+          <Pressable style={styles.canvasEmpty} onPress={pickImage}>
+            <Icon name="image" size={48} color={colors.border} />
+            <Text style={styles.canvasEmptyText}>点击上传图片，或输入提示词开始创作</Text>
+          </Pressable>
+        )}
+
+        {renderCanvasMask()}
+
+        {/* 框选模式提示条 */}
+        {selectMode ? (
+          <View style={styles.selectHintBar} pointerEvents="none">
+            <Icon name="region" size={14} color="#fff" />
+            <Text style={styles.selectHintText}>{SELECT_HINTS[selectMode]}</Text>
+          </View>
+        ) : null}
+
+        {!selectMode ? (
+          /* 底部工具栏（正常流，不遮挡画布） */
+          <ScrollView
+            horizontal
+            style={styles.toolRow}
+            contentContainerStyle={styles.toolList}
+            showsHorizontalScrollIndicator={false}
+          >
+            <ToolBtn icon="history" label="历史" colors={colors} onPress={() => setSheet('history')} />
+            <ToolBtn icon="compare" label="对比" colors={colors} disabled={!parentImage} onPress={() => setSheet('compare')} />
+            <ToolBtn icon="text" label="改字" colors={colors} disabled={!currentImage} onPress={() => setSheet('editText')} />
+            <ToolBtn icon="region" label="局部" colors={colors} active={selectMode === 'localEdit'} disabled={!currentImage} onPress={() => toggleSelectMode('localEdit')} />
+            <ToolBtn icon="crop" label="提取" colors={colors} active={selectMode === 'extract'} disabled={!currentImage} onPress={() => toggleSelectMode('extract')} />
+            <ToolBtn icon="expand" label="扩图" colors={colors} disabled={!currentImage} onPress={() => setSheet('outpaint')} />
+            <ToolBtn icon="enhance" label="清晰" colors={colors} disabled={!currentImage} onPress={() => runSpecial('enhance')} />
+            <ToolBtn icon="droplet" label="去水印" colors={colors} disabled={!currentImage} onPress={() => runSpecial('watermark')} />
+          </ScrollView>
+        ) : null}
       </View>
 
-      {/* Content */}
-      <View style={{ flex: 1 }}>
-        {bottomTab === 'canvas' ? (
-          <View style={styles.canvasPanel}>
-            <View style={styles.canvasArea}>
-              {currentImage ? (
-                <Image source={imageSource(currentImage.url, 1280)} style={styles.canvasImage} resizeMode="contain" />
-              ) : (
-                <Pressable style={styles.canvasEmpty} onPress={pickImage}>
-                  <Icon name="image" size={48} color={colors.border} />
-                  <Text style={styles.canvasEmptyText}>点击上传图片，或输入提示词开始创作</Text>
-                </Pressable>
-              )}
-            </View>
-            {/* Tool row */}
-            <ScrollView horizontal style={styles.toolRow} contentContainerStyle={styles.toolList} showsHorizontalScrollIndicator={false}>
-              <ToolBtn icon="history" label="历史" colors={colors} onPress={() => setSheet('history')} />
-              <ToolBtn icon="compare" label="对比" colors={colors} disabled={!parentImage} onPress={() => setSheet('compare')} />
-              <ToolBtn icon="text" label="改字" colors={colors} disabled={!currentImage} onPress={() => setSheet('editText')} />
-              <ToolBtn icon="region" label="局部" colors={colors} disabled={!currentImage} onPress={() => { setSelectMode('localEdit'); }} />
-              <ToolBtn icon="crop" label="提取" colors={colors} disabled={!currentImage} onPress={() => { setSelectMode('extract'); }} />
-              <ToolBtn icon="expand" label="扩图" colors={colors} disabled={!currentImage} onPress={() => setSheet('outpaint')} />
-              <ToolBtn icon="enhance" label="清晰" colors={colors} disabled={!currentImage} onPress={() => runSpecial('enhance')} />
-              <ToolBtn icon="droplet" label="去水印" colors={colors} disabled={!currentImage} onPress={() => runSpecial('watermark')} />
-              <ToolBtn icon="batch" label="批量" colors={colors} onPress={() => setSheet('batch')} />
-              <ToolBtn icon="gallery" label="画廊" colors={colors} onPress={() => setSheet('gallery')} />
-            </ScrollView>
-            {candidates.length > 1 && (
-              <ScrollView horizontal style={styles.candidateBar} contentContainerStyle={styles.candidateList} showsHorizontalScrollIndicator={false}>
-                {candidates.map((img) => (
-                  <Pressable key={img.id} onPress={() => useAsCurrent(img)} style={[styles.candidateItem, img.id === currentImage?.id && styles.candidateActive]}>
-                    <Image source={imageSource(img.url, 320)} style={styles.candidateImage} resizeMode="cover" />
-                  </Pressable>
-                ))}
-              </ScrollView>
-            )}
-          </View>
-        ) : (
-          <FlatList
-            data={messages}
-            keyExtractor={(item: Message) => item.id}
-            contentContainerStyle={styles.chatList}
-            inverted
-            renderItem={({ item }: { item: Message }) => (
-              <MessageBubble message={item} imagesById={imageMapOf(bundle)} colors={colors} />
-            )}
-          />
-        )}
+      {/* 框选确认操作条：位于画布手势区之外，避免被 PanResponder 抢占触摸 */}
+      {selectMode ? (
+        <View style={styles.selectActionBar}>
+          <Pressable style={styles.selectCancelBtn} onPress={() => { setSelectMode(null); setDragRect(null); }}>
+            <Text style={styles.selectCancelText}>取消</Text>
+          </Pressable>
+          <Text style={styles.selectSizeText}>
+            {dragValid && selectedRect ? `${selectedRect.width.toFixed(0)}% × ${selectedRect.height.toFixed(0)}%` : '拖拽框选'}
+          </Text>
+          <Pressable
+            style={[styles.selectNextBtn, !dragValid && { opacity: 0.4 }]}
+            disabled={!dragValid}
+            onPress={confirmSelection}
+          >
+            <Text style={styles.selectNextText}>下一步</Text>
+            <Icon name="chevronRight" size={14} color="#fff" />
+          </Pressable>
+        </View>
+      ) : null}
+      </View>
+      ) : (
+        /* 对话页：全高消息列表 */
+        <FlatList
+          style={styles.chatList}
+          data={messages}
+          keyExtractor={(item: Message) => item.id}
+          contentContainerStyle={styles.chatListContent}
+          inverted
+          renderItem={({ item }: { item: Message }) => (
+            <MessageBubble
+              message={item}
+              imagesById={imageMapOf(bundle)}
+              colors={colors}
+              onImagePress={(img) => setPreview({ image: img, message: item })}
+            />
+          )}
+        />
+      )}
+
+      {/* 候选图条 */}
+      {bottomTab === 'canvas' && candidates.length > 1 && (
+        <ScrollView horizontal style={styles.candidateBar} contentContainerStyle={styles.candidateList} showsHorizontalScrollIndicator={false}>
+          {candidates.map((img) => (
+            <Pressable key={img.id} onPress={() => useAsCurrent(img)} style={[styles.candidateItem, img.id === currentImage?.id && styles.candidateActive]}>
+              <Image source={imageSource(img.url, 320)} style={styles.candidateImage} resizeMode="cover" />
+            </Pressable>
+          ))}
+        </ScrollView>
+      )}
+
+      {/* Tab 栏：画布 / 对话 */}
+      <View style={styles.tabBar}>
+        <Pressable style={[styles.tabBtn, bottomTab === 'canvas' && styles.tabBtnActive]} onPress={() => setBottomTab('canvas')}>
+          <Icon name="image" size={16} color={bottomTab === 'canvas' ? '#fff' : colors.textSecondary} />
+          <Text style={[styles.tabText, bottomTab === 'canvas' && styles.tabTextActive]}>画布</Text>
+          {candidates.length > 1 ? <Text style={[styles.tabBadge, bottomTab === 'canvas' && styles.tabBadgeActive]}>{candidates.length}</Text> : null}
+        </Pressable>
+        <Pressable style={[styles.tabBtn, bottomTab === 'chat' && styles.tabBtnActive]} onPress={() => setBottomTab('chat')}>
+          <Icon name="chatbubble" size={16} color={bottomTab === 'chat' ? '#fff' : colors.textSecondary} />
+          <Text style={[styles.tabText, bottomTab === 'chat' && styles.tabTextActive]}>对话</Text>
+          {taskLabel ? <View style={styles.tabDot} /> : null}
+        </Pressable>
       </View>
 
       {/* Input bar */}
@@ -480,6 +728,10 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
                 <Text style={[styles.countText, count === n && styles.countTextActive]}>{n}</Text>
               </Pressable>
             ))}
+            <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
+              <Icon name="batch" size={13} color={colors.accent} />
+              <Text style={styles.batchPillText}>批量</Text>
+            </Pressable>
             {taskLabel ? (
               <Pressable style={styles.taskPill} onPress={cancelTask}>
                 <ActivityIndicator size="small" color="#fff" />
@@ -511,33 +763,41 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         </View>
       </KeyboardAvoidingView>
 
-      {/* Region selection overlays */}
-      {rectSelectorImage && selectMode === 'localEdit' && (
-        <RectSelector
-          imageUrl={rectSelectorImage.url}
-          imageWidth={rectSelectorImage.width}
-          imageHeight={rectSelectorImage.height}
-          title="局部编辑 · 框选区域"
-          hint="拖拽框选需要修改的区域（可从图片外开始拖拽，自动取交集）"
-          confirmLabel="下一步"
-          onConfirm={(rect) => { setSelectedRect(rect); setSelectMode(null); setSheet('localEdit'); }}
-          onCancel={() => setSelectMode(null)}
-        />
-      )}
-      {rectSelectorImage && selectMode === 'extract' && (
-        <RectSelector
-          imageUrl={rectSelectorImage.url}
-          imageWidth={rectSelectorImage.width}
-          imageHeight={rectSelectorImage.height}
-          title="提取素材 · 圈选主体"
-          hint="圈选想提取的主体（允许带少量背景，模型会自动去除干扰）"
-          confirmLabel="下一步"
-          onConfirm={(rect) => { setSelectedRect(rect); setSelectMode(null); setSheet('extractHint'); }}
-          onCancel={() => setSelectMode(null)}
-        />
-      )}
-
       {/* Sheets */}
+      {/* 消息图片预览（H5 式引用：大图 + 出处 + 设为画布） */}
+      <Modal visible={!!preview} transparent animationType="fade" onRequestClose={() => setPreview(null)}>
+        <View style={styles.previewOverlay}>
+          <View style={styles.previewHeader}>
+            <Text style={styles.previewTitle} numberOfLines={1}>
+              {preview?.message.content.versionNumber ? `V${preview.message.content.versionNumber} · 生成结果` : '图片预览'}
+            </Text>
+            <Pressable onPress={() => setPreview(null)} hitSlop={8}>
+              <Icon name="close" size={22} color="#fff" />
+            </Pressable>
+          </View>
+          {preview && (
+            <Image source={imageSource(preview.image.url, 1280)} style={styles.previewImage} resizeMode="contain" />
+          )}
+          {preview && (
+            <View style={styles.previewInfo}>
+              <Text style={styles.previewPrompt} numberOfLines={4}>
+                {preview.message.content.prompt || preview.message.content.text || '（无提示词）'}
+              </Text>
+              <Text style={styles.previewMeta}>
+                {[preview.message.content.modelName, preview.image.width ? `${preview.image.width}×${preview.image.height}` : ''].filter(Boolean).join(' · ')}
+              </Text>
+              <Pressable
+                style={styles.previewUseBtn}
+                onPress={() => { useAsCurrent(preview.image); setPreview(null); setBottomTab('canvas'); }}
+              >
+                <Icon name="image" size={15} color="#fff" />
+                <Text style={styles.previewUseText}>设为画布图片</Text>
+              </Pressable>
+            </View>
+          )}
+        </View>
+      </Modal>
+
       <ModalSheet visible={sheet === 'history'} title="历史版本" onClose={() => setSheet(null)}>
         <HistoryModal
           bundle={bundle}
@@ -594,7 +854,6 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
           onUse={(usePrompt, stylePrompt) => {
             setPrompt(usePrompt || '');
             setSheet(null);
-            setBottomTab('chat');
             notify(stylePrompt ? '提示词已填入（风格提示词已忽略，可在提示词中补充）' : '提示词已填入');
           }}
         />
@@ -622,12 +881,25 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
             multiline
           />
           <Pressable style={styles.referenceBtn} onPress={pickReference}>
-            <Icon name="upload" size={16} color={colors.accent} />
-            <Text style={styles.referenceText}>{localReference ? `已选参考图：${localReference.name || '图片'}` : '添加参考图（可选）'}</Text>
-            {localReference && (
-              <Pressable hitSlop={8} onPress={() => setLocalReference(null)}>
-                <Icon name="close" size={16} color={colors.muted} />
-              </Pressable>
+            {localReference ? (
+              <>
+                <Image
+                  source={{ uri: `data:${localReference.mimeType};base64,${localReference.data}` }}
+                  style={styles.referenceThumb}
+                  resizeMode="cover"
+                />
+                <Text style={styles.referenceText} numberOfLines={1}>
+                  已选参考图：{localReference.name || '图片'}
+                </Text>
+                <Pressable hitSlop={8} onPress={() => setLocalReference(null)}>
+                  <Icon name="close" size={16} color={colors.muted} />
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <Icon name="upload" size={16} color={colors.accent} />
+                <Text style={styles.referenceText}>添加参考图（可选）</Text>
+              </>
             )}
           </Pressable>
           {selectedRect && (
@@ -699,6 +971,17 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
           </View>
         </View>
       ) : null}
+
+      {/* 上传裁剪界面 */}
+      {cropAsset && (
+        <CropView
+          visible
+          uri={cropAsset.uri}
+          onCancel={() => setCropAsset(null)}
+          onUseOriginal={handleCropDone}
+          onConfirm={handleCropDone}
+        />
+      )}
     </View>
   );
 }
@@ -709,25 +992,26 @@ function imageMapOf(bundle: ProjectBundle): Map<string, ProjectImage> {
   return map;
 }
 
-function ToolBtn({ icon, label, colors, onPress, disabled }: { icon: string; label: string; colors: ReturnType<typeof useTheme>['colors']; onPress: () => void; disabled?: boolean }) {
+function ToolBtn({ icon, label, colors, onPress, disabled, active }: { icon: string; label: string; colors: ReturnType<typeof useTheme>['colors']; onPress: () => void; disabled?: boolean; active?: boolean }) {
   return (
     <Pressable
-      style={[toolStyles.btn, disabled && { opacity: 0.4 }]}
+      style={[toolStyles.btn, disabled && { opacity: 0.4 }, active && toolStyles.btnActive]}
       onPress={onPress}
       disabled={disabled}
     >
-      <Icon name={icon} size={18} color={disabled ? colors.muted : colors.accent} />
-      <Text style={[toolStyles.label, { color: colors.textSecondary }]}>{label}</Text>
+      <Icon name={icon} size={18} color={disabled ? colors.muted : active ? '#fff' : colors.accent} />
+      <Text style={[toolStyles.label, { color: disabled ? colors.muted : active ? '#fff' : colors.textSecondary }]}>{label}</Text>
     </Pressable>
   );
 }
 
 const toolStyles = StyleSheet.create({
   btn: { alignItems: 'center', justifyContent: 'center', gap: 2, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.md, backgroundColor: 'rgba(109,85,247,0.08)', minWidth: 56 },
+  btnActive: { backgroundColor: '#6d55f7' },
   label: { fontSize: 10 },
 });
 
-function MessageBubble({ message, imagesById, colors }: { message: Message; imagesById: Map<string, ProjectImage>; colors: ReturnType<typeof useTheme>['colors'] }) {
+function MessageBubble({ message, imagesById, colors, onImagePress }: { message: Message; imagesById: Map<string, ProjectImage>; colors: ReturnType<typeof useTheme>['colors']; onImagePress: (image: ProjectImage) => void }) {
   const isUser = message.role === 'user';
   const isSystem = message.role === 'system';
   const text = message.content.text || message.content.prompt || message.content.message || '';
@@ -736,12 +1020,14 @@ function MessageBubble({ message, imagesById, colors }: { message: Message; imag
     .filter((img): img is ProjectImage => Boolean(img && img.fileSize > 0));
 
   return (
-    <View style={[bubbleStyles.msgBubble, isUser ? bubbleStyles.msgUser : isSystem ? bubbleStyles.msgSystem : bubbleStyles.msgAssistant]}>
+    <View style={[bubbleStyles.msgBubble, isUser ? bubbleStyles.msgUser : isSystem ? bubbleStyles.msgSystem : { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border }]}>
       <Text style={[bubbleStyles.msgText, { color: isUser ? '#fff' : isSystem ? colors.danger : colors.text }]}>{text}</Text>
       {outputImages.length > 0 && (
         <View style={bubbleStyles.msgImages}>
           {outputImages.map((img) => (
-            <Image key={img.id} source={imageSource(img.url, 320)} style={bubbleStyles.msgImage} resizeMode="cover" />
+            <Pressable key={img.id} onPress={() => onImagePress(img)}>
+              <Image source={imageSource(img.url, 320)} style={bubbleStyles.msgImage} resizeMode="cover" />
+            </Pressable>
           ))}
         </View>
       )}
@@ -752,7 +1038,6 @@ function MessageBubble({ message, imagesById, colors }: { message: Message; imag
 const bubbleStyles = StyleSheet.create({
   msgBubble: { maxWidth: '88%', padding: spacing.md, borderRadius: radius.md, marginBottom: spacing.sm },
   msgUser: { alignSelf: 'flex-end', backgroundColor: '#6d55f7' },
-  msgAssistant: { alignSelf: 'flex-start', backgroundColor: '#ffffff', borderWidth: 1, borderColor: '#e4e6eb' },
   msgSystem: { alignSelf: 'center', backgroundColor: 'transparent' },
   msgText: { fontSize: fontSize.md, lineHeight: 20 },
   msgImages: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm },
@@ -767,23 +1052,38 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     topbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.lg, paddingBottom: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
     topbarBtn: { padding: spacing.xs },
     topbarTitle: { flex: 1, textAlign: 'center', fontSize: fontSize.md, fontWeight: '700', color: c.text, marginHorizontal: spacing.sm },
-    tabBar: { flexDirection: 'row', backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
-    tab: { flex: 1, paddingVertical: spacing.sm, alignItems: 'center' },
-    tabActive: { borderBottomWidth: 2, borderBottomColor: c.accent },
-    tabText: { fontSize: fontSize.md, color: c.muted },
-    tabTextActive: { color: c.accent, fontWeight: '700' },
-    canvasPanel: { flex: 1, backgroundColor: c.canvasBg },
-    canvasArea: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.md },
+    canvasArea: { flex: 1, backgroundColor: c.canvasBg, overflow: 'hidden' },
+    canvasWrap: { flex: 1, alignSelf: 'stretch' },
     canvasImage: { width: '100%', height: '100%' },
-    canvasEmpty: { alignItems: 'center', justifyContent: 'center', paddingVertical: spacing.xxl, flex: 1, alignSelf: 'stretch' },
-    canvasEmptyText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted, textAlign: 'center' },
-    toolRow: { flexGrow: 0, borderTopWidth: 1, borderTopColor: c.border, backgroundColor: c.card },
-    toolList: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.sm, alignItems: 'center' },
+    canvasEmpty: { alignItems: 'center', justifyContent: 'center', flex: 1, alignSelf: 'stretch' },
+    canvasEmptyText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted, textAlign: 'center', paddingHorizontal: spacing.xl },
+    maskLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+    cornerDot: { position: 'absolute', width: 8, height: 8, backgroundColor: c.accent, borderRadius: 2 },
+    selectHintBar: { position: 'absolute', top: spacing.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: 6 },
+    selectHintText: { color: '#fff', fontSize: fontSize.xs },
+    selectActionBar: { position: 'absolute', bottom: spacing.md, left: spacing.md, right: spacing.md, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: c.card, borderRadius: radius.md, borderWidth: 1, borderColor: c.border, padding: spacing.sm },
+    selectCancelBtn: { height: 38, paddingHorizontal: spacing.md, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, alignItems: 'center', justifyContent: 'center' },
+    selectCancelText: { color: c.textSecondary, fontSize: fontSize.sm },
+    selectSizeText: { flex: 1, textAlign: 'center', fontSize: fontSize.xs, color: c.muted },
+    selectNextBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, height: 38, paddingHorizontal: spacing.md, borderRadius: radius.sm, backgroundColor: c.accent },
+    selectNextText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '700' },
+    toolRow: { flexGrow: 0, height: 74, borderTopWidth: 1, borderTopColor: c.border, backgroundColor: c.card },
+    toolList: { paddingHorizontal: spacing.md, gap: spacing.sm, alignItems: 'center', paddingVertical: spacing.sm },
     candidateBar: { flexGrow: 0, borderTopWidth: 1, borderTopColor: c.border, backgroundColor: c.card },
     candidateList: { paddingHorizontal: spacing.md, paddingVertical: spacing.sm, gap: spacing.sm, alignItems: 'center' },
     candidateItem: { width: 56, height: 56, borderRadius: radius.sm, overflow: 'hidden', borderWidth: 2, borderColor: 'transparent' },
     candidateActive: { borderColor: c.accent },
     candidateImage: { width: '100%', height: '100%' },
+    tabBar: { flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: c.card, borderTopWidth: 1, borderTopColor: c.border },
+    tabBtn: { flex: 1, height: 38, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs },
+    tabBtnActive: { backgroundColor: c.accent, borderColor: c.accent },
+    tabText: { fontSize: fontSize.sm, color: c.textSecondary, fontWeight: '600' },
+    tabTextActive: { color: '#fff' },
+    tabBadge: { fontSize: fontSize.xs, color: c.accent, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: 6, paddingVertical: 1, overflow: 'hidden' },
+    tabBadgeActive: { color: '#fff', backgroundColor: 'rgba(255,255,255,0.25)' },
+    tabDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#fff' },
+    chatList: { flex: 1, backgroundColor: c.bg },
+    chatListContent: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.lg },
     countRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingBottom: spacing.sm },
     countLabel: { fontSize: fontSize.sm, color: c.muted },
     countBtn: { width: 30, height: 26, borderRadius: radius.sm, backgroundColor: c.bg, borderWidth: 1, borderColor: c.border, alignItems: 'center', justifyContent: 'center' },
@@ -792,8 +1092,18 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     countTextActive: { color: '#fff', fontWeight: '700' },
     taskPill: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: c.accent, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 4, marginLeft: 'auto' },
     taskPillText: { color: '#fff', fontSize: fontSize.xs },
+    batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
+    batchPillText: { color: c.accent, fontSize: fontSize.xs, fontWeight: '700' },
+    previewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', paddingTop: 50, paddingBottom: 30 },
+    previewHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
+    previewTitle: { color: '#fff', fontSize: fontSize.sm, fontWeight: '600', flex: 1 },
+    previewImage: { flex: 1, alignSelf: 'stretch' },
+    previewInfo: { paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.sm },
+    previewPrompt: { color: '#fff', fontSize: fontSize.sm, lineHeight: 19 },
+    previewMeta: { color: 'rgba(255,255,255,0.6)', fontSize: fontSize.xs },
+    previewUseBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, backgroundColor: '#6d55f7', marginTop: spacing.xs },
+    previewUseText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '700' },
     inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
-    chatList: { padding: spacing.md, gap: spacing.sm },
     inputBar: { flexDirection: 'column', padding: spacing.md, backgroundColor: c.card, borderTopWidth: 1, borderTopColor: c.border },
     input: { flex: 1, minHeight: 40, maxHeight: 80, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, fontSize: fontSize.md, color: c.text, backgroundColor: c.bg },
     sendBtn: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, height: 40, paddingHorizontal: spacing.md, borderRadius: radius.md, backgroundColor: c.accent },
@@ -801,6 +1111,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     fieldLabel: { fontSize: fontSize.sm, color: c.textSecondary, fontWeight: '600' },
     instructionInput: { minHeight: 80, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, backgroundColor: c.card, padding: spacing.md, fontSize: fontSize.md, color: c.text, textAlignVertical: 'top' },
     referenceBtn: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, padding: spacing.md, borderWidth: 1, borderStyle: 'dashed', borderColor: c.accent, borderRadius: radius.md },
+    referenceThumb: { width: 48, height: 48, borderRadius: radius.sm, backgroundColor: c.muted },
     referenceText: { flex: 1, color: c.accent, fontSize: fontSize.sm },
     rectNote: { fontSize: fontSize.xs, color: c.muted },
     sizeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },

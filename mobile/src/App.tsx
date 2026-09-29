@@ -1,10 +1,12 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { SafeAreaView, StyleSheet, Text, View } from 'react-native';
+import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
+import { StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { getAuthToken, api, clearAuthToken, initServerBase } from './api';
 import { ThemeProvider, useTheme } from './theme';
 import { fontSize, radius, spacing } from './theme';
 import type { ModelConfig, Project } from './types';
+import { Icon } from './components/Icon';
 import { LoginScreen } from './screens/LoginScreen';
 import { HomeScreen } from './screens/HomeScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
@@ -128,18 +130,18 @@ function AppShell() {
 
 export default function App() {
   return (
-    <ThemeProvider>
-      <AppShell />
-    </ThemeProvider>
+    <SafeAreaProvider>
+      <ThemeProvider>
+        <AppShell />
+      </ThemeProvider>
+    </SafeAreaProvider>
   );
 }
 
 function ToastView({ toast, colors }: { toast: Toast; colors: ReturnType<typeof useTheme>['colors'] }) {
   return (
     <View style={[toastStyles.toast, toast.kind === 'error' && { borderColor: colors.danger }, { backgroundColor: colors.card }]}>
-      <Text style={[toastStyles.toastText, { color: toast.kind === 'error' ? colors.danger : colors.success }]}>
-        {toast.kind === 'success' ? '✓' : '!'}
-      </Text>
+      <Icon name={toast.kind === 'success' ? 'check' : 'close'} size={16} color={toast.kind === 'error' ? colors.danger : colors.success} />
       <Text style={[toastStyles.toastMsg, { color: colors.text }]}>{toast.message}</Text>
     </View>
   );
@@ -159,6 +161,5 @@ const toastStyles = StyleSheet.create({
     shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.1, shadowRadius: 10, zIndex: 9999,
   },
-  toastText: { fontSize: fontSize.md, fontWeight: '700' },
   toastMsg: { fontSize: fontSize.sm, flex: 1 },
 });

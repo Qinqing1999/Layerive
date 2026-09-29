@@ -2801,7 +2801,11 @@ const server = http.createServer(async (req, res) => {
     if (taskMatch && req.method === 'GET') {
       const task = db.prepare('SELECT * FROM generation_tasks WHERE id = ? AND project_id = ?').get(taskMatch[2], taskMatch[1]);
       if (!task) throw Object.assign(new Error('任务不存在'), { status: 404 });
-      return json(res, 200, { id: task.id, status: task.status, operationType: task.operation_type, stage: parseJson(task.input_json).stage || null, error: parseJson(task.error_json, null)?.message || null, createdAt: task.created_at, finishedAt: task.finished_at });
+      // 全局队列中的位次（1 起），仅排队中任务有
+      const queuePosition = task.status === 'queued'
+        ? (pendingTasks.findIndex((entry) => entry.taskId === task.id) + 1 || null)
+        : null;
+      return json(res, 200, { id: task.id, status: task.status, operationType: task.operation_type, stage: parseJson(task.input_json).stage || null, error: parseJson(task.error_json, null)?.message || null, createdAt: task.created_at, finishedAt: task.finished_at, queuePosition });
     }
     const cancelMatch = pathname.match(/^\/api\/projects\/([^/]+)\/tasks\/([^/]+)\/cancel$/);
     if (cancelMatch && req.method === 'POST') {
