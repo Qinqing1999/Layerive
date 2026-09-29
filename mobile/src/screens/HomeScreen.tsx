@@ -1,4 +1,4 @@
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -46,9 +46,17 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
   const [menuVisible, setMenuVisible] = useState(false);
   const [renameTarget, setRenameTarget] = useState<Project | null>(null);
   const [renameValue, setRenameValue] = useState('');
+  const [renameDesc, setRenameDesc] = useState('');
   const [busy, setBusy] = useState('');
+  const [sortMode, setSortMode] = useState<'updated' | 'name' | 'favorite'>('updated');
 
-  const filtered = projects.filter((p) => !search || p.name.toLowerCase().includes(search.toLowerCase()));
+  const filtered = useMemo(() => {
+    let list = projects.filter((p) => !search || p.name.toLowerCase().includes(search.toLowerCase()));
+    if (sortMode === 'updated') list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    else if (sortMode === 'name') list.sort((a, b) => a.name.localeCompare(b.name));
+    else if (sortMode === 'favorite') list.sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || b.updatedAt.localeCompare(a.updatedAt));
+    return list;
+  }, [projects, search, sortMode]);
 
   async function handleCreate() {
     if (!newName.trim() || creating) return;
@@ -98,15 +106,16 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
   function rename(project: Project) {
     setRenameTarget(project);
     setRenameValue(project.name);
+    setRenameDesc(project.description || '');
   }
 
   async function submitRename() {
     if (!renameTarget || !renameValue.trim()) return;
     try {
-      await api.updateProject(renameTarget.id, { name: renameValue.trim() });
+      await api.updateProject(renameTarget.id, { name: renameValue.trim(), description: renameDesc.trim() });
       setRenameTarget(null);
       await onRefresh();
-      notify('已重命名');
+      notify('已更新');
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
@@ -203,16 +212,25 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
         </Pressable>
       </View>
 
-      {/* Search */}
-      <View style={styles.searchBox}>
-        <Icon name="search" size={16} color={colors.muted} />
-        <TextInput
-          style={styles.searchInput}
-          value={search}
-          onChangeText={setSearch}
-          placeholder="搜索项目…"
-          placeholderTextColor={colors.muted}
-        />
+      {/* Search + Sort */}
+      <View style={styles.searchRow}>
+        <View style={styles.searchBox}>
+          <Icon name="search" size={16} color={colors.muted} />
+          <TextInput
+            style={styles.searchInput}
+            value={search}
+            onChangeText={setSearch}
+            placeholder="搜索项目…"
+            placeholderTextColor={colors.muted}
+          />
+        </View>
+        <Pressable
+          style={styles.sortBtn}
+          onPress={() => setSortMode(sortMode === 'updated' ? 'name' : sortMode === 'name' ? 'favorite' : 'updated')}
+        >
+          <Icon name="data" size={16} color={colors.muted} />
+          <Text style={styles.sortText}>{sortMode === 'updated' ? '最近' : sortMode === 'name' ? '名称' : '收藏'}</Text>
+        </Pressable>
       </View>
 
       {/* List */}
@@ -284,7 +302,7 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
       <Modal visible={Boolean(renameTarget)} animationType="fade" transparent>
         <View style={styles.modalOverlay}>
           <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>重命名项目</Text>
+            <Text style={styles.modalTitle}>编辑项目</Text>
             <TextInput
               style={styles.modalInput}
               value={renameValue}
@@ -292,6 +310,15 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
               placeholder="项目名称"
               placeholderTextColor={colors.muted}
               autoFocus
+            />
+            <TextInput
+              style={[styles.modalInput, styles.modalDesc]}
+              value={renameDesc}
+              onChangeText={setRenameDesc}
+              placeholder="项目描述（可选）"
+              placeholderTextColor={colors.muted}
+              multiline
+              numberOfLines={3}
             />
             <View style={styles.modalActions}>
               <Pressable style={styles.modalCancel} onPress={() => setRenameTarget(null)}>
@@ -389,8 +416,11 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     createBtnText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
     iconBtn: { padding: spacing.sm },
     moreDots: { fontSize: 16, color: c.muted, fontWeight: '700' },
-    searchBox: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginHorizontal: spacing.lg, marginBottom: spacing.md, paddingHorizontal: spacing.md, height: 40, borderRadius: radius.md, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
+    searchBox: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, flex: 1, paddingHorizontal: spacing.md, height: 40, borderRadius: radius.md, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
     searchInput: { flex: 1, fontSize: fontSize.md, color: c.text },
+    searchRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginHorizontal: spacing.lg, marginBottom: spacing.md },
+    sortBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: spacing.md, height: 40, borderRadius: radius.md, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
+    sortText: { fontSize: fontSize.sm, color: c.muted, fontWeight: '600' },
     listContent: { padding: spacing.lg, paddingBottom: spacing.xxl, gap: spacing.md },
     empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md, paddingVertical: spacing.xxl },
     emptyText: { color: c.muted, fontSize: fontSize.md, textAlign: 'center' },

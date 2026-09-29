@@ -156,6 +156,15 @@ export const api = {
   galleryFromImage: (projectId: string, imageId: string) =>
     request<{ entry: GalleryEntryItem }>('/api/gallery/from-image', { method: 'POST', body: { projectId, imageId } }),
 
+  galleryUpdate: (id: string, input: Partial<{ title: string; prompt: string; stylePrompt: string; category: string }>) =>
+    request<{ entry: GalleryEntryItem }>(`/api/gallery/${id}`, { method: 'PATCH', body: input }),
+
+  galleryDelete: (id: string) =>
+    request<{ ok: boolean }>(`/api/gallery/${id}`, { method: 'DELETE' }),
+
+  localEditBatch: (id: string, input: Record<string, unknown>) =>
+    request<GenerateResult>(`/api/projects/${id}/local-edit-batch`, { method: 'POST', body: input }),
+
   models: () => request<ModelsPayload>('/api/models'),
 };
 

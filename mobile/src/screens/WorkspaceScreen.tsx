@@ -52,6 +52,12 @@ type PercentRect = { x: number; y: number; width: number; height: number };
 /** 画布内拖拽产生的显示坐标矩形 */
 type DragRect = { x: number; y: number; width: number; height: number };
 
+/** 选区拖拽手柄类型：创建新框 / 整体移动 / 八方向调整 */
+type DragHandle = 'create' | 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'w' | 'e';
+
+/** 边缘检测容差（像素）：触摸点距选区边/角在此范围内视为拖拽手柄 */
+const HANDLE_TOLERANCE = 24;
+
 /** EXIF Orientation → 顺时针旋转角度（Android 裁剪不自动烘焙 EXIF，需显式旋转） */
 function exifRotation(asset: { exif?: Record<string, unknown> | null }): number {
   const orientation = Number(asset.exif?.Orientation ?? 1);
@@ -81,7 +87,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const [bundle, setBundle] = useState<ProjectBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [prompt, setPrompt] = useState('');
-  const [generating, setGenerating] = useState(false);
+  const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [activeTask, setActiveTask] = useState<GenerationTask | null>(null);
   const [bottomTab, setBottomTab] = useState<WorkspaceTab>('canvas');
   const insets = useSafeAreaInsets();
@@ -104,6 +110,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     };
   }
   const [dragRect, setDragRect] = useState<DragRect | null>(null);
+  const dragHandleRef = useRef<DragHandle>('create');
+  const rectBeforeDragRef = useRef<DragRect | null>(null);
   const [localInstruction, setLocalInstruction] = useState('');
   const [localReference, setLocalReference] = useState<{ data: string; mimeType: string; name?: string } | null>(null);
   const [extractHint, setExtractHint] = useState('');
@@ -158,6 +166,16 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }, [projectId, notify]);
 
   useEffect(() => { void loadBundle(); }, [loadBundle]);
+
+  // 草稿防抖保存到服务端
+  useEffect(() => {
+    if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
+    draftTimerRef.current = setTimeout(async () => {
+      if (!prompt.trim() || !bundle) return;
+      try { await api.updateProject(projectId, { draft: { prompt } }); } catch { /* ignore */ }
+    }, 900);
+    return () => { if (draftTimerRef.current) clearTimeout(draftTimerRef.current); };
+  }, [prompt, projectId, bundle]);
 
   // 进入工作台（或 App 重启后重进）恢复进行中/排队中的任务，让队列显示与轮询接上
   useEffect(() => {
@@ -299,23 +317,21 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     notify(`已切换到 V${version.number}，可从此版本继续创作`);
   }
 
-  /** 提交任务并记录可重试闭包；轮询发现失败时可通过该闭包原样重发 */
+  /** 提交任务后立即返回（fire-and-track），不等待 getTask —— 轮询 effect 会自动拉取状态 */
   async function runTracked(submit: () => Promise<GenerateResult>) {
     setFailedTask(null);
     const result = await submit();
     lastSubmitRef.current = { taskId: result.taskId, submit };
-    // getTask 可能因网络瞬时失败返回 404，最多重试 3 次（每次间隔 1s）
-    let task: GenerationTask | null = null;
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        task = await api.getTask(projectId, result.taskId);
-        break;
-      } catch (e) {
-        if (attempt === 2) throw e;
-        await new Promise((r) => setTimeout(r, 1000));
-      }
-    }
-    setActiveTask(task);
+    // 立即设置 queued 状态，让轮询 effect 接管后续状态更新
+    setActiveTask({
+      id: result.taskId,
+      status: 'queued',
+      operationType: undefined,
+      stage: null,
+      error: null,
+      createdAt: new Date().toISOString(),
+      finishedAt: null,
+    });
   }
 
   function retryFailed() {
@@ -327,7 +343,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }
 
   async function submitGenerate() {
-    if (!prompt.trim() || generating) return;
+    if (!prompt.trim() || activeTask) return;
     // 提交前固化输入，失败重试时沿用当时的画布图与父版本
     const input: Record<string, unknown> = {
       prompt: prompt.trim(),
@@ -336,15 +352,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     };
     if (currentImage) input.imageId = currentImage.id;
     if (parentVersionId) input.parentVersionId = parentVersionId;
-    setGenerating(true);
     setBottomTab('chat');
     try {
       await runTracked(() => api.generate(projectId, input));
       setParentVersionId(null);
     } catch (e) {
       notify((e as Error).message, 'error');
-    } finally {
-      setGenerating(false);
     }
   }
 
@@ -559,6 +572,17 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     }
   }
 
+  /** 收藏当前预览图片到画廊 */
+  async function favoriteToGallery() {
+    if (!preview) return;
+    try {
+      await api.galleryFromImage(projectId, preview.image.id);
+      notify('已收藏到画廊');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    }
+  }
+
   // ---- 画布框选：图片在画布内的实际显示区域（aspectFit） ----
   const imageDisplay = useMemo(() => {
     const cw = canvasSize.w;
@@ -570,28 +594,96 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     return { left: (cw - w) / 2, top: (ch - h) / 2, w, h };
   }, [canvasSize, currentImage?.width, currentImage?.height]);
 
+  /** 判断触摸点落在已有选区的哪个手柄上 */
+  function hitTest(p: { x: number; y: number }, rect: DragRect): DragHandle {
+    const { x, y, width, height } = rect;
+    const left = x, right = x + width, top = y, bottom = y + height;
+    const nearLeft = Math.abs(p.x - left) <= HANDLE_TOLERANCE;
+    const nearRight = Math.abs(p.x - right) <= HANDLE_TOLERANCE;
+    const nearTop = Math.abs(p.y - top) <= HANDLE_TOLERANCE;
+    const nearBottom = Math.abs(p.y - bottom) <= HANDLE_TOLERANCE;
+    if (nearTop && nearLeft) return 'nw';
+    if (nearTop && nearRight) return 'ne';
+    if (nearBottom && nearLeft) return 'sw';
+    if (nearBottom && nearRight) return 'se';
+    if (nearTop) return 'n';
+    if (nearBottom) return 's';
+    if (nearLeft) return 'w';
+    if (nearRight) return 'e';
+    // 在选区内部 → 整体移动
+    if (p.x > left && p.x < right && p.y > top && p.y < bottom) return 'move';
+    return 'create';
+  }
+
+  /** 夹紧到图片显示区域 */
+  function clampRect(r: DragRect): DragRect {
+    if (!imageDisplay) return r;
+    const minSize = 20;
+    const left = Math.max(imageDisplay.left, Math.min(imageDisplay.left + imageDisplay.w - minSize, r.x));
+    const top = Math.max(imageDisplay.top, Math.min(imageDisplay.top + imageDisplay.h - minSize, r.y));
+    const right = Math.min(imageDisplay.left + imageDisplay.w, r.x + r.width);
+    const bottom = Math.min(imageDisplay.top + imageDisplay.h, r.y + r.height);
+    return { x: left, y: top, width: Math.max(minSize, right - left), height: Math.max(minSize, bottom - top) };
+  }
+
   const panResponder = useMemo(() => PanResponder.create({
     onStartShouldSetPanResponder: () => Boolean(selectMode),
     onMoveShouldSetPanResponder: () => Boolean(selectMode),
     onPanResponderGrant: (evt) => {
       if (!selectMode || !imageDisplay) return;
-      // Android 上 locationX 会随子 View 边界跳变，改用 pageX 减容器原点
       const p = canvasPoint(evt);
-      dragStartRef.current = p;
-      setDragRect({ x: p.x, y: p.y, width: 0, height: 0 });
+      // 判断触摸点落在已有选区的哪个位置
+      const handle = dragRect ? hitTest(p, dragRect) : 'create';
+      dragHandleRef.current = handle;
+      rectBeforeDragRef.current = dragRect ? { ...dragRect } : null;
+      if (handle === 'create') {
+        dragStartRef.current = p;
+        setDragRect({ x: p.x, y: p.y, width: 0, height: 0 });
+      }
     },
     onPanResponderMove: (evt) => {
-      const start = dragStartRef.current;
-      if (!start || !imageDisplay || !selectMode) return;
-      const { x, y } = canvasPoint(evt);
-      const left = Math.max(imageDisplay.left, Math.min(start.x, x));
-      const right = Math.min(imageDisplay.left + imageDisplay.w, Math.max(start.x, x));
-      const top = Math.max(imageDisplay.top, Math.min(start.y, y));
-      const bottom = Math.min(imageDisplay.top + imageDisplay.h, Math.max(start.y, y));
-      setDragRect({ x: left, y: top, width: right - left, height: bottom - top });
+      if (!selectMode || !imageDisplay) return;
+      const p = canvasPoint(evt);
+      const handle = dragHandleRef.current;
+      const base = rectBeforeDragRef.current;
+      if (handle === 'create') {
+        const start = dragStartRef.current;
+        if (!start) return;
+        const left = Math.max(imageDisplay.left, Math.min(start.x, p.x));
+        const right = Math.min(imageDisplay.left + imageDisplay.w, Math.max(start.x, p.x));
+        const top = Math.max(imageDisplay.top, Math.min(start.y, p.y));
+        const bottom = Math.min(imageDisplay.top + imageDisplay.h, Math.max(start.y, p.y));
+        setDragRect({ x: left, y: top, width: right - left, height: bottom - top });
+      } else if (handle === 'move' && base) {
+        const dx = p.x - (dragStartRef.current?.x ?? p.x);
+        const dy = p.y - (dragStartRef.current?.y ?? p.y);
+        setDragRect(clampRect({ x: base.x + dx, y: base.y + dy, width: base.width, height: base.height }));
+      } else if (base && (handle === 'nw' || handle === 'ne' || handle === 'sw' || handle === 'se' || handle === 'n' || handle === 's' || handle === 'w' || handle === 'e')) {
+        let { x, y, width, height } = base;
+        if (handle.includes('n')) {
+          const newY = Math.max(imageDisplay.top, Math.min(base.y + base.height - 20, p.y));
+          height += y - newY;
+          y = newY;
+        }
+        if (handle.includes('s')) {
+          height = Math.max(20, Math.min(imageDisplay.top + imageDisplay.h - y, p.y - y));
+        }
+        if (handle.includes('w')) {
+          const newX = Math.max(imageDisplay.left, Math.min(base.x + base.width - 20, p.x));
+          width += x - newX;
+          x = newX;
+        }
+        if (handle.includes('e')) {
+          width = Math.max(20, Math.min(imageDisplay.left + imageDisplay.w - x, p.x - x));
+        }
+        setDragRect(clampRect({ x, y, width, height }));
+      }
     },
-    onPanResponderRelease: () => { dragStartRef.current = null; },
-  }), [selectMode, imageDisplay]);
+    onPanResponderRelease: () => {
+      dragStartRef.current = null;
+      rectBeforeDragRef.current = null;
+    },
+  }), [selectMode, imageDisplay, dragRect]);
 
   // 显示坐标 → 图片百分比坐标
   const dragPercent = useMemo<PercentRect | null>(() => {
@@ -615,11 +707,24 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     if (!dragRect) setSelectedRect(null);
   }, [dragPercent, dragValid, dragRect, selectMode]);
 
-  /** 选区外蒙版：上 / 下 / 左 / 右四块半透明遮罩 */
+  /** 选区外蒙版：上 / 下 / 左 / 右四块半透明遮罩 + 四角拖拽手柄 + 四边中点手柄 */
   const renderCanvasMask = () => {
     if (!selectMode || !dragRect || !imageDisplay) return null;
     const { left: dLeft, top: dTop, w: dW, h: dH } = imageDisplay;
     const maskColor = 'rgba(0,0,0,0.55)';
+    const hs = 10; // 手柄边长的一半
+    const corners = [
+      { left: dragRect.x - hs, top: dragRect.y - hs },
+      { left: dragRect.x + dragRect.width - hs, top: dragRect.y - hs },
+      { left: dragRect.x - hs, top: dragRect.y + dragRect.height - hs },
+      { left: dragRect.x + dragRect.width - hs, top: dragRect.y + dragRect.height - hs },
+    ];
+    const edges = [
+      { left: dragRect.x + dragRect.width / 2 - hs, top: dragRect.y - hs }, // n
+      { left: dragRect.x + dragRect.width / 2 - hs, top: dragRect.y + dragRect.height - hs }, // s
+      { left: dragRect.x - hs, top: dragRect.y + dragRect.height / 2 - hs }, // w
+      { left: dragRect.x + dragRect.width - hs, top: dragRect.y + dragRect.height / 2 - hs }, // e
+    ];
     return (
       <View pointerEvents="none" style={styles.maskLayer}>
         <View style={{ position: 'absolute', left: dLeft, top: dTop, width: dW, height: Math.max(0, dragRect.y - dTop), backgroundColor: maskColor }} />
@@ -627,11 +732,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         <View style={{ position: 'absolute', left: dLeft, top: dragRect.y, width: Math.max(0, dragRect.x - dLeft), height: dragRect.height, backgroundColor: maskColor }} />
         <View style={{ position: 'absolute', left: dragRect.x + dragRect.width, top: dragRect.y, width: Math.max(0, (dLeft + dW) - (dragRect.x + dragRect.width)), height: dragRect.height, backgroundColor: maskColor }} />
         <View style={{ position: 'absolute', left: dragRect.x, top: dragRect.y, width: dragRect.width, height: dragRect.height, borderWidth: 2, borderColor: colors.accent, borderRadius: radius.sm }} />
-        {/* 四角指示点 */}
-        <View style={[styles.cornerDot, { left: dragRect.x - 4, top: dragRect.y - 4 }]} />
-        <View style={[styles.cornerDot, { left: dragRect.x + dragRect.width - 4, top: dragRect.y - 4 }]} />
-        <View style={[styles.cornerDot, { left: dragRect.x - 4, top: dragRect.y + dragRect.height - 4 }]} />
-        <View style={[styles.cornerDot, { left: dragRect.x + dragRect.width - 4, top: dragRect.y + dragRect.height - 4 }]} />
+        {/* 四角手柄（大圆点） */}
+        {corners.map((c, i) => (
+          <View key={`c${i}`} style={[styles.cornerDot, { left: c.left, top: c.top }]} />
+        ))}
+        {/* 四边中点手柄（小方块） */}
+        {edges.map((e, i) => (
+          <View key={`e${i}`} style={[styles.edgeHandle, { left: e.left, top: e.top }]} />
+        ))}
       </View>
     );
   };
@@ -866,7 +974,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
               multiline
               scrollEnabled={false}
             />
-            {generating || activeTask ? (
+            {activeTask ? (
               <Pressable style={[styles.sendBtn, { backgroundColor: colors.danger }]} onPress={cancelTask}>
                 <Icon name="stop" size={16} color="#fff" />
               </Pressable>
@@ -916,6 +1024,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
                   <Icon name="share" size={15} color={colors.accent} />
                   <Text style={styles.previewShareText}>保存 / 分享</Text>
                 </Pressable>
+                {preview.message ? (
+                  <Pressable style={styles.previewGalleryBtn} onPress={() => void favoriteToGallery()}>
+                    <Icon name="heart" size={15} color={colors.accent} />
+                    <Text style={styles.previewGalleryText}>收藏到画廊</Text>
+                  </Pressable>
+                ) : null}
                 <Pressable
                   style={styles.previewUseBtn}
                   onPress={() => { useAsCurrent(preview.image); setPreview(null); setBottomTab('canvas'); }}
@@ -1350,6 +1464,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     canvasEmptyText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted, textAlign: 'center', paddingHorizontal: spacing.xl },
     maskLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
     cornerDot: { position: 'absolute', width: 8, height: 8, backgroundColor: c.accent, borderRadius: 2 },
+    edgeHandle: { position: 'absolute', width: 20, height: 20, backgroundColor: '#fff', borderWidth: 2, borderColor: c.accent, borderRadius: 4 },
     selectHintBar: { position: 'absolute', top: spacing.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: 6 },
     selectHintText: { color: '#fff', fontSize: fontSize.xs },
     selectActionBar: { position: 'absolute', bottom: spacing.md, left: spacing.md, right: spacing.md, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: c.card, borderRadius: radius.md, borderWidth: 1, borderColor: c.border, padding: spacing.sm },
@@ -1396,6 +1511,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     previewActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
     previewShareBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, borderWidth: 1, borderColor: c.accent },
     previewShareText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
+    previewGalleryBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, borderWidth: 1, borderColor: `${c.accent}55` },
+    previewGalleryText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '600' },
     previewUseBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, backgroundColor: c.accent },
     previewUseText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '700' },
     inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
