@@ -822,6 +822,19 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       {bottomTab === 'chat' ? (
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
         <View style={styles.inputBar}>
+          {currentImage ? (
+            <View style={styles.canvasHint}>
+              {imageSource(currentImage.url, 128) ? (
+                <Image source={imageSource(currentImage.url, 128)} style={styles.canvasHintThumb} resizeMode="cover" />
+              ) : null}
+              <View style={styles.canvasHintTextWrap}>
+                <Text style={styles.canvasHintTitle}>正在编辑画布图片</Text>
+                <Text style={styles.canvasHintMeta} numberOfLines={1}>
+                  {[currentImage.width && currentImage.height ? `${currentImage.width}×${currentImage.height}` : '', '输入描述即可修改'].filter(Boolean).join(' · ')}
+                </Text>
+              </View>
+            </View>
+          ) : null}
           <View style={styles.countRow}>
             <CountSelect value={count} onChange={setCount} colors={colors} />
             <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
@@ -1347,6 +1360,11 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     chatListContent: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.lg },
     historyPage: { flex: 1, backgroundColor: c.bg },
     countRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingBottom: spacing.sm },
+    canvasHint: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm, padding: spacing.sm, borderRadius: radius.md, backgroundColor: `${c.accent}14`, borderWidth: 1, borderColor: `${c.accent}33` },
+    canvasHintThumb: { width: 44, height: 44, borderRadius: radius.sm, backgroundColor: c.bg },
+    canvasHintTextWrap: { flex: 1, gap: 2 },
+    canvasHintTitle: { fontSize: fontSize.xs, fontWeight: '700', color: c.accent },
+    canvasHintMeta: { fontSize: fontSize.xs, color: c.muted },
     taskPill: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: c.accent, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 4, maxWidth: 132 },
     taskPillText: { color: '#fff', fontSize: fontSize.xs },
     batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
