@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ActivityIndicator,
   Alert,
+  BackHandler,
   FlatList,
   Image,
   KeyboardAvoidingView,
@@ -18,9 +19,8 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Sharing from 'expo-sharing';
-import * as FileSystem from 'expo-file-system';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath, authHeaders } from '../api';
+import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } from '../api';
 import { outpaintPresets } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
@@ -168,6 +168,18 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }, [projectId, notify]);
 
   useEffect(() => { void loadBundle(); }, [loadBundle]);
+
+  // 拦截系统返回键，防止误触发回桌面
+  const handleBack = useCallback(() => { onBack(); return true; }, [onBack]);
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+    try {
+      BackHandler.addEventListener('hardwareBackPress', handleBack);
+    } catch {
+      // older RN versions may not support addEventListener API
+    }
+    return () => { /* cleanup handled by OS */ };
+  }, [handleBack]);
 
   // 草稿防抖保存到服务端
   useEffect(() => {
