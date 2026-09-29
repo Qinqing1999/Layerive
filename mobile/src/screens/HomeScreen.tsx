@@ -48,15 +48,14 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
   const [renameValue, setRenameValue] = useState('');
   const [renameDesc, setRenameDesc] = useState('');
   const [busy, setBusy] = useState('');
-  const [sortMode, setSortMode] = useState<'updated' | 'name' | 'favorite'>('updated');
+  const [filter, setFilter] = useState<'all' | 'updated' | 'favorite'>('all');
 
   const filtered = useMemo(() => {
     let list = projects.filter((p) => !search || p.name.toLowerCase().includes(search.toLowerCase()));
-    if (sortMode === 'updated') list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    else if (sortMode === 'name') list.sort((a, b) => a.name.localeCompare(b.name));
-    else if (sortMode === 'favorite') list.sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || b.updatedAt.localeCompare(a.updatedAt));
+    if (filter === 'favorite') list.sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || b.updatedAt.localeCompare(a.updatedAt));
+    else list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return list;
-  }, [projects, search, sortMode]);
+  }, [projects, search, filter]);
 
   async function handleCreate() {
     if (!newName.trim() || creating) return;
@@ -224,13 +223,17 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
             placeholderTextColor={colors.muted}
           />
         </View>
-        <Pressable
-          style={styles.sortBtn}
-          onPress={() => setSortMode(sortMode === 'updated' ? 'name' : sortMode === 'name' ? 'favorite' : 'updated')}
-        >
-          <Icon name="data" size={16} color={colors.muted} />
-          <Text style={styles.sortText}>{sortMode === 'updated' ? '最近' : sortMode === 'name' ? '名称' : '收藏'}</Text>
-        </Pressable>
+      </View>
+
+      {/* Filter Tabs */}
+      <View style={styles.filterRow}>
+        {(['all', 'updated', 'favorite'] as const).map((f) => (
+          <Pressable key={f} style={[styles.filterTab, filter === f && styles.filterTabActive]} onPress={() => setFilter(f)}>
+            <Text style={[styles.filterTabText, filter === f && styles.filterTabTextActive]}>
+              {f === 'all' ? '全部' : f === 'updated' ? '最近' : '收藏'}
+            </Text>
+          </Pressable>
+        ))}
       </View>
 
       {/* List */}
@@ -421,6 +424,11 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     searchRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginHorizontal: spacing.lg, marginBottom: spacing.md },
     sortBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: spacing.md, height: 40, borderRadius: radius.md, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
     sortText: { fontSize: fontSize.sm, color: c.muted, fontWeight: '600' },
+    filterRow: { flexDirection: 'row', gap: spacing.xs, marginHorizontal: spacing.lg, marginBottom: spacing.sm },
+    filterTab: { paddingHorizontal: spacing.md, paddingVertical: 6, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border },
+    filterTabActive: { backgroundColor: c.accent, borderColor: c.accent },
+    filterTabText: { fontSize: fontSize.sm, color: c.muted, fontWeight: '500' },
+    filterTabTextActive: { color: '#fff', fontWeight: '700' },
     listContent: { padding: spacing.lg, paddingBottom: spacing.xxl, gap: spacing.md },
     empty: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: spacing.md, paddingVertical: spacing.xxl },
     emptyText: { color: c.muted, fontSize: fontSize.md, textAlign: 'center' },
