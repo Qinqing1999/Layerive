@@ -1,11 +1,11 @@
 import { Platform } from 'react-native';
 
-// 服务端地址 - 开发时用本机 IP，生产时可改为线上地址
+// 服务端地址 - 开发时用本机 IP，生产时由 AsyncStorage 持久化的用户设置覆盖
 export const API_BASE = __DEV__
   ? Platform.OS === 'android'
     ? 'http://10.0.2.2:8788'  // Android 模拟器
     : 'http://127.0.0.1:8788'  // iOS 模拟器 / 物理设备
-  : 'https://api.pixelforge.app'; // 生产环境
+  : 'http://127.0.0.1:8788'; // 生产环境默认本机，用户可在设置页修改
 
 // Shared types (from web version)
 export type ModelConfig = {

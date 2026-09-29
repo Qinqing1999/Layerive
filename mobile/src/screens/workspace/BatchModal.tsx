@@ -9,6 +9,7 @@ import { Icon } from '../../components/Icon';
 type Props = {
   projectId: string;
   imageModel: ModelConfig | null;
+  visionModelId: string;
   hasCanvasImage: boolean;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onFinished: () => void;
@@ -28,7 +29,7 @@ function parseVariables(template: string): string[] {
 }
 
 /** Batch panel: batch edit (needs canvas image) / batch text-to-image, with live progress. */
-export function BatchModal({ projectId, imageModel, hasCanvasImage, notify, onFinished, onClose }: Props) {
+export function BatchModal({ projectId, imageModel, visionModelId, hasCanvasImage, notify, onFinished, onClose }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const canEdit = hasCanvasImage && Boolean(imageModel?.capabilities.includes('edit_prompt'));
@@ -98,7 +99,7 @@ export function BatchModal({ projectId, imageModel, hasCanvasImage, notify, onFi
     if (error) { notify(error, 'error'); return; }
     setStarting(true);
     try {
-      const base: Record<string, unknown> = {};
+      const base: Record<string, unknown> = { visionModelId };
       if (entry === 'template') {
         base.template = template;
         base.quantity = quantity;

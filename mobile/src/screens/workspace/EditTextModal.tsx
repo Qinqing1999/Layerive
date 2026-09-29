@@ -9,13 +9,14 @@ import { Icon } from '../../components/Icon';
 type Props = {
   projectId: string;
   image: ProjectImage;
+  visionModelId: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onSubmitted: (taskId: string) => void;
   onCancel: () => void;
 };
 
 /** Recognized-text editor: load segments, edit / delete / add, then submit edit-text task. */
-export function EditTextModal({ projectId, image, notify, onSubmitted, onCancel }: Props) {
+export function EditTextModal({ projectId, image, visionModelId, notify, onSubmitted, onCancel }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [loading, setLoading] = useState(true);
@@ -26,7 +27,7 @@ export function EditTextModal({ projectId, image, notify, onSubmitted, onCancel 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    api.recognizeText(projectId, image.id)
+    api.recognizeText(projectId, image.id, visionModelId)
       .then((result) => {
         if (cancelled) return;
         setSegments(result.segments || []);
@@ -57,6 +58,7 @@ export function EditTextModal({ projectId, image, notify, onSubmitted, onCancel 
     try {
       const result = await api.editText(projectId, {
         imageId: image.id,
+        visionModelId,
         segments: changed.map((seg) => ({
           originalText: seg.originalText,
           text: seg.text,

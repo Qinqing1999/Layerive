@@ -1,6 +1,7 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { Image, PanResponder, StyleSheet, Text, View } from 'react-native';
 import { imageSource } from '../../api';
+import { useTheme } from '../../theme';
 import { fontSize, spacing } from '../../theme';
 
 type Props = {
@@ -12,9 +13,11 @@ type Props = {
 
 /** Side-by-side slider comparison: before image underneath, after image clipped from the left. */
 export function CompareModal({ beforeUrl, afterUrl, beforeLabel, afterLabel }: Props) {
-  const styles = makeStyles();
+  const { colors } = useTheme();
+  const styles = makeStyles(colors);
   const [pos, setPos] = useState(0.5);
   const [width, setWidth] = useState(0);
+  const [originX, setOriginX] = useState(0);
   const posRef = useRef(0.5);
   posRef.current = pos;
 
@@ -23,16 +26,17 @@ export function CompareModal({ beforeUrl, afterUrl, beforeLabel, afterLabel }: P
     onMoveShouldSetPanResponder: () => true,
     onPanResponderMove: (evt) => {
       if (!width) return;
-      const x = evt.nativeEvent.locationX;
+      // Android: locationX 会随子 View 边界跳变，统一用 pageX 减容器原点
+      const x = evt.nativeEvent.pageX - originX;
       setPos(Math.max(0, Math.min(1, x / width)));
     },
-  }), [width]);
+  }), [width, originX]);
 
   return (
     <View style={styles.container}>
       <View
         style={styles.stage}
-        onLayout={(e) => setWidth(e.nativeEvent.layout.width)}
+        onLayout={(e) => { setWidth(e.nativeEvent.layout.width); setOriginX(e.nativeEvent.layout.x); }}
         {...pan.panHandlers}
       >
         {beforeUrl && <Image source={imageSource(beforeUrl, 1280)} style={StyleSheet.absoluteFill} resizeMode="contain" />}
@@ -54,9 +58,9 @@ export function CompareModal({ beforeUrl, afterUrl, beforeLabel, afterLabel }: P
   );
 }
 
-const makeStyles = () =>
+const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({
-    container: { flex: 1, backgroundColor: '#101114', padding: spacing.md },
+    container: { flex: 1, backgroundColor: c.canvasBg, padding: spacing.md },
     stage: { flex: 1, borderRadius: 12, overflow: 'hidden', backgroundColor: '#000' },
     knob: {
       position: 'absolute', top: '50%', left: -14, width: 28, height: 28, borderRadius: 14,
@@ -69,5 +73,5 @@ const makeStyles = () =>
     },
     tagLeft: { left: spacing.md },
     tagRight: { right: spacing.md },
-    hint: { textAlign: 'center', color: '#9aa0ab', fontSize: fontSize.sm, paddingVertical: spacing.md },
+    hint: { textAlign: 'center', color: c.muted, fontSize: fontSize.sm, paddingVertical: spacing.md },
   });

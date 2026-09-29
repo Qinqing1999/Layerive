@@ -75,7 +75,7 @@ const SELECT_HINTS: Record<'localEdit' | 'extract', string> = {
   extract: '圈选想提取的主体（允许带少量背景）',
 };
 
-export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify }: Props) {
+export function WorkspaceScreen({ projectId, models, activeModel, activeVisionModel, onBack, notify }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [bundle, setBundle] = useState<ProjectBundle | null>(null);
@@ -228,6 +228,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         mediaTypes: ['images'],
         quality: 0.9,
         base64: true,
+        exif: true,
       });
       const asset = result.assets?.[0];
       if (!asset?.base64) return;
@@ -264,7 +265,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
 
   async function pickReference() {
     try {
-      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.9, base64: true });
+      const result = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.9, base64: true, exif: true });
       const asset = result.assets?.[0];
       if (!asset?.base64) return;
       // 参考图同样先进入裁剪界面，可编辑选择范围后再使用
@@ -303,7 +304,17 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
     setFailedTask(null);
     const result = await submit();
     lastSubmitRef.current = { taskId: result.taskId, submit };
-    const task = await api.getTask(projectId, result.taskId);
+    // getTask 可能因网络瞬时失败返回 404，最多重试 3 次（每次间隔 1s）
+    let task: GenerationTask | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        task = await api.getTask(projectId, result.taskId);
+        break;
+      } catch (e) {
+        if (attempt === 2) throw e;
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    }
     setActiveTask(task);
   }
 
@@ -321,6 +332,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
     const input: Record<string, unknown> = {
       prompt: prompt.trim(),
       params: { count },
+      visionModelId: activeVisionModel,
     };
     if (currentImage) input.imageId = currentImage.id;
     if (parentVersionId) input.parentVersionId = parentVersionId;
@@ -374,8 +386,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       watermark: '视觉模型将先判断并定位水印，再由图片模型修复遮挡区域。继续？',
     } as const;
     const ops = {
-      enhance: () => api.enhance(projectId, { imageId: currentImage.id }),
-      watermark: () => api.removeWatermark(projectId, { imageId: currentImage.id }),
+      enhance: () => api.enhance(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel }),
+      watermark: () => api.removeWatermark(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel }),
     } as const;
     Alert.alert(kind === 'enhance' ? '图片变清晰' : '去水印', tips[kind], [
       { text: '取消', style: 'cancel' },
@@ -397,7 +409,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
     setSheet(null);
     try {
       setBottomTab('chat');
-      await runTracked(() => api.outpaint(projectId, { imageId, size }));
+      await runTracked(() => api.outpaint(projectId, { imageId, size, visionModelId: activeVisionModel }));
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
@@ -409,6 +421,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       imageId: currentImage.id,
       rect: selectedRect,
       instruction: localInstruction.trim(),
+      visionModelId: activeVisionModel,
     };
     if (localReference) input.reference = localReference;
     setSheet(null);
@@ -460,6 +473,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         rect,
         crop: { data: rendered.base64, mimeType: 'image/jpeg' },
         hint,
+        visionModelId: activeVisionModel,
       });
     };
     setExtractBusy(true);
@@ -808,7 +822,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
           {candidates.length > 1 ? <Text style={[styles.tabBadge, bottomTab === 'canvas' && styles.tabBadgeActive]}>{candidates.length}</Text> : null}
         </Pressable>
         <Pressable style={[styles.tabBtn, bottomTab === 'chat' && styles.tabBtnActive]} onPress={() => setBottomTab('chat')}>
-          <Icon name="chatbubble" size={16} color={bottomTab === 'chat' ? '#fff' : colors.textSecondary} />
+          <Icon name="chatbubble-ellipses" size={16} color={bottomTab === 'chat' ? '#fff' : colors.textSecondary} />
           <Text style={[styles.tabText, bottomTab === 'chat' && styles.tabTextActive]}>对话</Text>
           {activeTask ? <View style={styles.tabDot} /> : null}
         </Pressable>
@@ -940,6 +954,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
           <EditTextModal
             projectId={projectId}
             image={currentImage}
+            visionModelId={activeVisionModel}
             notify={notify}
             onSubmitted={(taskId) => {
               setSheet(null);
@@ -958,6 +973,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         <BatchModal
           projectId={projectId}
           imageModel={imageModel}
+          visionModelId={activeVisionModel}
           hasCanvasImage={Boolean(currentImage)}
           notify={notify}
           onFinished={() => { void loadBundle(); }}
@@ -1267,21 +1283,23 @@ const tasksPanelStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   });
 
 function ToolBtn({ icon, label, colors, onPress, disabled, active }: { icon: string; label: string; colors: ReturnType<typeof useTheme>['colors']; onPress: () => void; disabled?: boolean; active?: boolean }) {
+  const ts = toolStyles(colors);
   return (
     <Pressable
-      style={[toolStyles.btn, disabled && { opacity: 0.4 }, active && toolStyles.btnActive]}
+      style={[ts.btn, disabled && { opacity: 0.4 }, active && ts.btnActive]}
       onPress={onPress}
       disabled={disabled}
     >
       <Icon name={icon} size={18} color={disabled ? colors.muted : active ? '#fff' : colors.accent} />
-      <Text style={[toolStyles.label, { color: disabled ? colors.muted : active ? '#fff' : colors.textSecondary }]}>{label}</Text>
+      <Text style={[ts.label, { color: disabled ? colors.muted : active ? '#fff' : colors.textSecondary }]}>{label}</Text>
     </Pressable>
   );
 }
 
-const toolStyles = StyleSheet.create({
-  btn: { alignItems: 'center', justifyContent: 'center', gap: 2, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.md, backgroundColor: 'rgba(109,85,247,0.08)', minWidth: 56 },
-  btnActive: { backgroundColor: '#6d55f7' },
+const toolStyles = (c: ReturnType<typeof useTheme>['colors']) =>
+  StyleSheet.create({
+  btn: { alignItems: 'center', justifyContent: 'center', gap: 2, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.md, backgroundColor: `${c.accent}14`, minWidth: 56 },
+  btnActive: { backgroundColor: c.accent },
   label: { fontSize: 10 },
 });
 
@@ -1294,7 +1312,7 @@ function MessageBubble({ message, imagesById, colors, onImagePress }: { message:
     .filter((img): img is ProjectImage => Boolean(img && img.fileSize > 0));
 
   return (
-    <View style={[bubbleStyles.msgBubble, isUser ? bubbleStyles.msgUser : isSystem ? bubbleStyles.msgSystem : { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border }]}>
+    <View style={[bubbleStyles.msgBubble, isUser ? { alignSelf: 'flex-end', backgroundColor: colors.accent } : isSystem ? bubbleStyles.msgSystem : { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border }]}>
       <Text style={[bubbleStyles.msgText, { color: isUser ? '#fff' : isSystem ? colors.danger : colors.text }]}>{text}</Text>
       {outputImages.length > 0 && (
         <View style={bubbleStyles.msgImages}>
@@ -1311,7 +1329,6 @@ function MessageBubble({ message, imagesById, colors, onImagePress }: { message:
 
 const bubbleStyles = StyleSheet.create({
   msgBubble: { maxWidth: '88%', padding: spacing.md, borderRadius: radius.md, marginBottom: spacing.sm },
-  msgUser: { alignSelf: 'flex-end', backgroundColor: '#6d55f7' },
   msgSystem: { alignSelf: 'center', backgroundColor: 'transparent' },
   msgText: { fontSize: fontSize.md, lineHeight: 20 },
   msgImages: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.sm },
@@ -1379,7 +1396,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     previewActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
     previewShareBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, borderWidth: 1, borderColor: c.accent },
     previewShareText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
-    previewUseBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, backgroundColor: '#6d55f7' },
+    previewUseBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, backgroundColor: c.accent },
     previewUseText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '700' },
     inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
     inputBar: { flexDirection: 'column', padding: spacing.md, backgroundColor: c.card, borderTopWidth: 1, borderTopColor: c.border },

@@ -116,8 +116,8 @@ export const api = {
 
   cancelTask: (id: string, taskId: string) => request<{ ok: boolean; status: string }>(`/api/projects/${id}/tasks/${taskId}/cancel`, { method: 'POST' }),
 
-  recognizeText: (id: string, imageId: string) =>
-    request<{ segments: TextSegment[]; modelName: string; cached: boolean }>(`/api/projects/${id}/recognize-text`, { method: 'POST', body: { imageId } }),
+  recognizeText: (id: string, imageId: string, visionModelId?: string) =>
+    request<{ segments: TextSegment[]; modelName: string; cached: boolean }>(`/api/projects/${id}/recognize-text`, { method: 'POST', body: { imageId, visionModelId } }),
 
   editText: (id: string, input: Record<string, unknown>) =>
     request<GenerateResult>(`/api/projects/${id}/edit-text`, { method: 'POST', body: input }),
