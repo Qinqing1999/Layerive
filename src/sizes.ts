@@ -39,19 +39,49 @@ export function isValidSizeForProvider(provider: string | undefined, size: strin
   return sizesForProvider(provider).some((option) => option.value === size);
 }
 
+function optionRatio(option: SizeOption): number {
+  const [width, height] = option.value.split('x').map(Number);
+  return width / height;
+}
+
+function logRatioGap(ratioA: number, ratioB: number): number {
+  return Math.abs(Math.log(ratioA / ratioB));
+}
+
+// Mainstream canvas ratios, ordered by how commonly they are used. The
+// outpaint panel maps these onto each provider's supported sizes so users
+// pick a familiar ratio instead of raw pixel dimensions.
+export const MAINSTREAM_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'] as const;
+
+// Map a mainstream ratio onto the provider size whose aspect ratio is closest.
+function sizeOptionForRatio(provider: string | undefined, ratio: string): SizeOption {
+  const target = Number(ratio.split(':')[0]) / Number(ratio.split(':')[1]);
+  return sizesForProvider(provider).reduce((closest, option) =>
+    logRatioGap(optionRatio(option), target) < logRatioGap(optionRatio(closest), target) ? option : closest);
+}
+
+// Mainstream ratio presets, deduplicated by mapped size so every button is a
+// distinct choice; the chip keeps the requested ratio plus the real size.
+export function mainstreamSizeOptions(provider: string | undefined): SizeOption[] {
+  const seen = new Set<string>();
+  const options: SizeOption[] = [];
+  for (const ratio of MAINSTREAM_RATIOS) {
+    const mapped = sizeOptionForRatio(provider, ratio);
+    if (seen.has(mapped.value)) continue;
+    seen.add(mapped.value);
+    options.push({ value: mapped.value, ratio, label: mapped.label });
+  }
+  return options;
+}
+
 // Providers accept a small set of canvas sizes. For uploaded source images,
 // choose the option whose aspect ratio is closest on a logarithmic scale so
 // portrait and landscape mismatches are penalized symmetrically.
 export function closestSizeForDimensions(provider: string | undefined, width: number | null, height: number | null): string {
   if (!width || !height || width <= 0 || height <= 0) return defaultSizeForProvider(provider);
   const ratio = width / height;
-  return sizesForProvider(provider).reduce((closest, option) => {
-    const [candidateWidth, candidateHeight] = option.value.split('x').map(Number);
-    const closestRatio = Number(closest.split('x')[0]) / Number(closest.split('x')[1]);
-    const candidateDistance = Math.abs(Math.log(ratio / (candidateWidth / candidateHeight)));
-    const closestDistance = Math.abs(Math.log(ratio / closestRatio));
-    return candidateDistance < closestDistance ? option.value : closest;
-  }, defaultSizeForProvider(provider));
+  return sizesForProvider(provider).reduce((closest, option) =>
+    logRatioGap(optionRatio(option), ratio) < logRatioGap(optionRatio(closest), ratio) ? option : closest).value;
 }
 
 // Output format and transparent background are OpenAI-only capabilities.

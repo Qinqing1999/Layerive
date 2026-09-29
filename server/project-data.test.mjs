@@ -7,6 +7,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createZip } from './zip.mjs';
 import { makeDemoPng } from './png.mjs';
+import { authHeaders, login } from './test-auth.mjs';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -37,8 +38,10 @@ test('project import validates archive paths and remaps self-contained data', { 
   for (let i = 0; i < 100 && !/127\.0\.0\.1:\d+/.test(logs); i += 1) await pause(30);
   const base = logs.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
   assert.ok(base, logs);
+  const token = await login(base);
+  const auth = authHeaders(token);
   const post = async (endpoint, input, expected) => {
-    const response = await fetch(`${base}/api${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+    const response = await fetch(`${base}/api${endpoint}`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
     const payload = await response.json();
     assert.equal(response.status, expected, JSON.stringify(payload));
     return payload;
@@ -75,8 +78,8 @@ test('project import validates archive paths and remaps self-contained data', { 
   }, 201);
   assert.equal(missing.images.length, 1, 'missing files retain their image relationship for recovery');
 
-  const deleted = await fetch(`${base}/api/models/image`, { method: 'DELETE' });
+  const deleted = await fetch(`${base}/api/models/image`, { method: 'DELETE', headers: auth });
   assert.equal(deleted.status, 200);
-  const models = await (await fetch(`${base}/api/models`)).json();
+  const models = await (await fetch(`${base}/api/models`, { headers: auth })).json();
   assert.equal(models.activeModel, '', 'a vision model must never become the image default');
 });

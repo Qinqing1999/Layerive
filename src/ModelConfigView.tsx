@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
+import { api } from './api';
 import { Icon } from './Icon';
 import { useTheme } from './theme';
-import type { ModelConfig } from './types';
+import type { AdminSettings, AdminUser, ModelConfig } from './types';
 
 type Props = {
   models: ModelConfig[];
@@ -14,6 +15,7 @@ type Props = {
   onActivateVision: (id: string) => Promise<void>;
   onTestConfig: (model: Partial<ModelConfig>) => Promise<string>;
   onRevealApiKey: (id: string) => Promise<string>;
+  notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
 const senseNovaUrl = 'https://token.sensenova.cn/v1';
@@ -34,8 +36,15 @@ function providerBaseUrl(type: ModelConfig['type'], provider: ModelConfig['provi
 
 function blankFor(type: ModelConfig['type'] = 'image'): ModelConfig {
   return type === 'vision'
-    ? { id: '', name: '', type, provider: 'openai', apiFormat: defaultVisionApiFormat, baseUrl: openAiUrl, apiKey: '', model: 'gpt-4.1-mini', capabilities: ['image_understanding'], defaultParams: {} }
-    : { id: '', name: '', type, provider: 'openai', baseUrl: openAiUrl, apiKey: '', model: 'gpt-image-2', capabilities: ['text_to_image', 'image_to_image', 'edit_prompt'], defaultParams: { size: '1024x1024', count: 1, quality: 'auto' } };
+    ? { id: '', name: '', type, provider: 'openai', apiFormat: defaultVisionApiFormat, baseUrl: openAiUrl, apiKey: '', apiKeys: [], model: 'gpt-4.1-mini', capabilities: ['image_understanding'], defaultParams: {} }
+    : { id: '', name: '', type, provider: 'openai', baseUrl: openAiUrl, apiKey: '', apiKeys: [], model: 'gpt-image-2', capabilities: ['text_to_image', 'image_to_image', 'edit_prompt'], defaultParams: { size: '1024x1024', count: 1, quality: 'auto' } };
+}
+
+// The key pool is edited as one key per line; the first line is the primary
+// key used by connection tests.
+function keyPoolText(model: Pick<ModelConfig, 'apiKey' | 'apiKeys'>) {
+  const keys = model.apiKeys?.length ? model.apiKeys : (model.apiKey ? [model.apiKey] : []);
+  return keys.join('\n');
 }
 
 function defaultModel(type: ModelConfig['type'], provider: ModelConfig['provider']) {
@@ -47,14 +56,15 @@ function defaultModel(type: ModelConfig['type'], provider: ModelConfig['provider
   return 'gpt-image-2';
 }
 
-export function ModelConfigView({ models, activeModel, activeVisionModel, onBack, onSave, onDelete, onActivate, onActivateVision, onTestConfig, onRevealApiKey }: Props) {
+export function ModelConfigView({ models, activeModel, activeVisionModel, onBack, onSave, onDelete, onActivate, onActivateVision, onTestConfig, onRevealApiKey, notify }: Props) {
   const { theme, toggleTheme } = useTheme();
+  const [section, setSection] = useState<'models' | 'operations'>('models');
   const [selectedId, setSelectedId] = useState(models[0]?.id || '');
   const [form, setForm] = useState<ModelConfig>(models[0] || blankFor());
+  const [keyPool, setKeyPool] = useState(keyPoolText(models[0] || { apiKey: '', apiKeys: [] }));
   const [creating, setCreating] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testResult, setTestResult] = useState('');
-  const [showApiKey, setShowApiKey] = useState(false);
   const [revealingApiKey, setRevealingApiKey] = useState(false);
   const imageModels = useMemo(() => models.filter((model) => model.type !== 'vision'), [models]);
   const visionModels = useMemo(() => models.filter((model) => model.type === 'vision'), [models]);
@@ -70,11 +80,17 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
     else if (models[0]) { setSelectedId(models[0].id); setForm(models[0]); }
   }, [models, selectedId, creating]);
 
+  // Keep the pool textarea in sync with the selected (or reloaded) model.
+  useEffect(() => {
+    if (creating) return;
+    setKeyPool(keyPoolText(form));
+  }, [form, creating]);
+
   function choose(id: string) {
     const selected = models.find((item) => item.id === id);
-    if (selected) { setCreating(false); setSelectedId(id); setForm(selected); setTestResult(''); setShowApiKey(false); }
+    if (selected) { setCreating(false); setSelectedId(id); setForm(selected); setKeyPool(keyPoolText(selected)); setTestResult(''); }
   }
-  function startCreate(type: ModelConfig['type']) { setCreating(true); setSelectedId(''); setForm(blankFor(type)); setTestResult(''); setShowApiKey(false); }
+  function startCreate(type: ModelConfig['type']) { setCreating(true); setSelectedId(''); setForm(blankFor(type)); setKeyPool(''); setTestResult(''); }
   function update<K extends keyof ModelConfig>(key: K, value: ModelConfig[K]) { setForm((current) => ({ ...current, [key]: value })); }
   function changeType(type: ModelConfig['type']) {
     setForm((current) => ({ ...current, type, provider: 'openai', apiFormat: type === 'vision' ? defaultVisionApiFormat : undefined, baseUrl: openAiUrl, model: defaultModel(type, 'openai'), capabilities: type === 'vision' ? ['image_understanding'] : ['text_to_image', 'image_to_image', 'edit_prompt'], defaultParams: type === 'vision' ? {} : { size: '1024x1024', count: 1, quality: 'auto' } }));
@@ -85,25 +101,40 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
   function toggleCapability(capability: string) {
     update('capabilities', form.capabilities.includes(capability) ? form.capabilities.filter((item) => item !== capability) : [...form.capabilities, capability]);
   }
-  async function toggleApiKeyVisibility() {
-    if (showApiKey) { setShowApiKey(false); return; }
-    if (selectedId && form.apiKey === '••••••••') {
-      setRevealingApiKey(true);
-      try {
-        const apiKey = await onRevealApiKey(selectedId);
-        if (!apiKey) return;
-        setForm((current) => current.id === selectedId ? { ...current, apiKey } : current);
-      } finally { setRevealingApiKey(false); }
-    }
-    setShowApiKey(true);
+  async function revealFirstKey() {
+    const firstLine = keyPool.split('\n')[0] || '';
+    if (!selectedId || !firstLine.includes('••')) return;
+    setRevealingApiKey(true);
+    try {
+      const apiKey = await onRevealApiKey(selectedId);
+      if (!apiKey) return;
+      setKeyPool((current) => {
+        const lines = current.split('\n');
+        lines[0] = apiKey;
+        return lines.join('\n');
+      });
+    } finally { setRevealingApiKey(false); }
+  }
+  function parsedKeyPool() {
+    return keyPool.split('\n').map((line) => line.trim()).filter(Boolean);
   }
   async function save() {
     setSaving(true);
     try {
-      const saved = await onSave(form, selectedId || undefined);
-      if (saved) setShowApiKey(false);
+      const apiKeys = parsedKeyPool();
+      const saved = await onSave({ ...form, apiKey: apiKeys[0] || '', apiKeys }, selectedId || undefined);
+      if (saved) { setKeyPool(keyPoolText(saved)); }
       if (!selectedId && saved?.id) { setCreating(false); setSelectedId(saved.id); setForm(saved); }
     } finally { setSaving(false); }
+  }
+  async function testConnection() {
+    const apiKeys = parsedKeyPool();
+    let candidate: Partial<ModelConfig> = { ...form, apiKey: apiKeys[0] || '', apiKeys };
+    if (candidate.apiKey === '••••••••' && selectedId) {
+      const revealed = await onRevealApiKey(selectedId);
+      if (revealed) candidate = { ...candidate, apiKey: revealed };
+    }
+    setTestResult(await onTestConfig(candidate));
   }
   function renderItem(model: ModelConfig) {
     const typeLabel = model.type === 'vision' ? '视觉识别' : '图片生成';
@@ -119,11 +150,17 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
   return (
     <main className="settings-page">
       <header className="settings-topbar">
-        <button className="back-button" onClick={onBack}><Icon name="left" size={15} /> 返回项目</button>
-        <div><p className="eyebrow">GLOBAL SETTINGS</p><h1>模型配置</h1></div>
-        <div className="save-state"><button className="icon-button theme-toggle" onClick={toggleTheme} title={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'} aria-label="切换配色模式"><Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} /></button><span className="status-dot" />配置保存在本机</div>
+        <button className="back-button" onClick={onBack}><Icon name="left" size={15} /> 返回</button>
+        <div><p className="eyebrow">ADMIN CONSOLE</p><h1>管理后台</h1></div>
+        <div className="save-state"><button className="icon-button theme-toggle" onClick={toggleTheme} title={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'} aria-label="切换配色模式"><Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} /></button><span className="status-dot" />仅管理员可见</div>
       </header>
 
+      <nav className="admin-tabs" role="tablist" aria-label="管理后台分区">
+        <button role="tab" aria-selected={section === 'models'} className={section === 'models' ? 'active' : ''} onClick={() => setSection('models')}>模型与密钥</button>
+        <button role="tab" aria-selected={section === 'operations'} className={section === 'operations' ? 'active' : ''} onClick={() => setSection('operations')}>用户与队列</button>
+      </nav>
+
+      {section === 'operations' ? <OperationsPanel notify={notify} /> : <>
       <section className="models-layout">
         <aside className="model-list-panel">
           <div className="panel-heading"><div><h2>模型列表</h2><p>{models.length} 个可用配置</p></div><div className="model-add-actions"><button title="添加图片生成模型" onClick={() => startCreate('image')}><Icon name="plus" size={13} /> 图</button><button title="添加视觉识别模型" onClick={() => startCreate('vision')}><Icon name="plus" size={13} /> 识</button></div></div>
@@ -132,7 +169,7 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
             <p className="model-group-title vision">视觉识别模型</p>{visionModels.map(renderItem)}
             {!visionModels.length && <button className="empty-model-group" onClick={() => startCreate('vision')}><Icon name="plus" size={14} /> 添加视觉识别模型</button>}
           </div>
-          <div className="model-help"><strong>关于密钥</strong><p>密钥仅保存在本机配置文件中，不会写入项目对话和任务历史。</p></div>
+          <div className="model-help"><strong>关于密钥</strong><p>密钥仅保存在本机配置文件中，不会写入项目对话和任务历史。多 Key 轮询的轮转状态仅存在于内存。</p></div>
         </aside>
 
         <section className="model-form-panel">
@@ -149,7 +186,7 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
 
           <label className="field"><span>{form.type === 'vision' ? 'API Base URL' : isSenseNova ? '日日新服务地址' : isGemini ? 'Gemini API Base URL' : isGrok ? 'xAI API Base URL' : isAgnes ? 'Agnes API Base URL' : 'API Base URL'}</span><input disabled={form.type === 'image' && isSenseNova} value={form.baseUrl} onChange={(event) => update('baseUrl', event.target.value)} placeholder={providerBaseUrl(form.type, form.provider)} /><small className="field-help">{form.type === 'vision' ? '填写服务根地址；也兼容直接填写完整接口地址。' : isSenseNova ? `固定使用 ${providerBaseUrl(form.type, form.provider)}。` : isGemini ? '官方地址为 https://generativelanguage.googleapis.com/v1beta。' : isGrok ? '官方地址为 https://api.x.ai/v1。' : isAgnes ? '官方地址为 https://apihub.agnes-ai.com/v1。' : '例如 https://api.openai.com/v1 或中转站提供的 /v1 根地址。'}</small></label>
           <div className="form-grid two-columns">
-            <label className="field"><span>{form.type === 'vision' ? 'API Key' : isSenseNova ? '日日新 API Key' : isGemini ? 'Gemini API Key' : isGrok ? 'xAI API Key' : isAgnes ? 'Agnes API Key' : 'OpenAI API Key'}</span><div className="secret-input"><input type={showApiKey ? 'text' : 'password'} value={form.apiKey} onChange={(event) => update('apiKey', event.target.value)} placeholder={isGemini ? 'AIza...' : 'sk-...'} /><button type="button" disabled={revealingApiKey} onClick={() => void toggleApiKeyVisibility()} title={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-label={showApiKey ? '隐藏 API Key' : '显示 API Key'} aria-pressed={showApiKey}>{revealingApiKey ? <span className="secret-loading" /> : <Icon name={showApiKey ? 'eyeOff' : 'eye'} size={17} />}</button></div></label>
+            <label className="field key-pool-field"><span>{form.type === 'vision' ? 'API Key 池' : isSenseNova ? '日日新 API Key 池' : isGemini ? 'Gemini API Key 池' : isGrok ? 'xAI API Key 池' : isAgnes ? 'Agnes API Key 池' : 'OpenAI API Key 池'}</span><div className="secret-input key-pool"><textarea rows={Math.min(6, Math.max(2, keyPool.split('\n').length + (keyPool.endsWith('\n') ? 1 : 0)))} value={keyPool} onChange={(event) => setKeyPool(event.target.value)} placeholder={'sk-第一个 Key\nsk-第二个 Key（可选，自动轮询）'} spellCheck={false} autoComplete="off" /><button type="button" disabled={revealingApiKey} onClick={() => void revealFirstKey()} title="回显保存的第一个 API Key" aria-label="回显保存的第一个 API Key">{revealingApiKey ? <span className="secret-loading" /> : <Icon name="eye" size={17} />}</button></div><small className="field-help">每行一个 Key；第一个 Key 用于连接测试。请求会按池内 Key 轮询使用，遇到 429 限流自动换下一个 Key 重试。被掩码（••••••••）的行保存时保留原 Key。</small></label>
             <label className="field"><span>{form.type === 'vision' ? '视觉识别模型名称 *' : '图片生成模型名称 *'}</span><input value={form.model} onChange={(event) => update('model', event.target.value)} placeholder={defaultModel(form.type, form.provider)} /></label>
           </div>
 
@@ -168,10 +205,151 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
           {testResult && <div className="test-result">{testResult}</div>}
           <div className="form-footer">
             <div>{selectedId && <button className="text-danger" onClick={() => { if (window.confirm('删除该模型配置？历史项目中的参数快照仍会保留。')) void onDelete(selectedId); }}>删除模型</button>}</div>
-            <div className="footer-actions"><button className="button secondary" disabled={!form.name.trim() || !form.model.trim()} onClick={async () => setTestResult(await onTestConfig(form))}>测试连接</button><button className="button primary" disabled={!form.name.trim() || !form.model.trim() || saving} onClick={() => void save()}>{saving ? '保存中…' : '保存配置'}</button></div>
+            <div className="footer-actions"><button className="button secondary" disabled={!form.name.trim() || !form.model.trim()} onClick={() => void testConnection()}>测试连接</button><button className="button primary" disabled={!form.name.trim() || !form.model.trim() || saving} onClick={() => void save()}>{saving ? '保存中…' : '保存配置'}</button></div>
           </div>
         </section>
       </section>
+      </>}
     </main>
+  );
+}
+
+// The operations tab is only reachable for admins: user accounts plus the
+// global queue concurrency setting live here.
+function OperationsPanel({ notify }: { notify: (message: string, kind?: 'success' | 'error') => void }) {
+  const [users, setUsers] = useState<AdminUser[]>([]);
+  const [settings, setSettings] = useState<AdminSettings | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [newUser, setNewUser] = useState({ username: '', password: '', role: 'user' as 'admin' | 'user' });
+  const [creatingUser, setCreatingUser] = useState(false);
+  const [passwordDrafts, setPasswordDrafts] = useState<Record<string, string>>({});
+  const [savingUser, setSavingUser] = useState('');
+  const [savingSettings, setSavingSettings] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const [userPayload, settingsPayload] = await Promise.all([api.adminUsers(), api.adminSettings()]);
+        if (cancelled) return;
+        setUsers(userPayload.users);
+        setSettings(settingsPayload);
+      } catch (error) {
+        notify((error as Error).message, 'error');
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [notify]);
+
+  async function refreshUsers() {
+    try {
+      const payload = await api.adminUsers();
+      setUsers(payload.users);
+    } catch (error) {
+      notify((error as Error).message, 'error');
+    }
+  }
+
+  async function createUser() {
+    const username = newUser.username.trim();
+    if (!username || !newUser.password || creatingUser) return;
+    setCreatingUser(true);
+    try {
+      await api.createAdminUser({ username, password: newUser.password, role: newUser.role });
+      setNewUser({ username: '', password: '', role: 'user' });
+      notify(`已创建用户 ${username}`);
+      await refreshUsers();
+    } catch (error) {
+      notify((error as Error).message, 'error');
+    } finally {
+      setCreatingUser(false);
+    }
+  }
+
+  async function patchUser(user: AdminUser, input: { password?: string; role?: 'admin' | 'user' }) {
+    if (savingUser) return;
+    setSavingUser(user.username);
+    try {
+      await api.updateAdminUser(user.username, input);
+      notify(`已更新用户 ${user.username}`);
+      setPasswordDrafts((current) => ({ ...current, [user.username]: '' }));
+      await refreshUsers();
+    } catch (error) {
+      notify((error as Error).message, 'error');
+    } finally {
+      setSavingUser('');
+    }
+  }
+
+  async function removeUser(user: AdminUser) {
+    if (!window.confirm(`删除用户 ${user.username}？该账号的登录会话会立即失效。`)) return;
+    try {
+      await api.deleteAdminUser(user.username);
+      notify(`已删除用户 ${user.username}`);
+      await refreshUsers();
+    } catch (error) {
+      notify((error as Error).message, 'error');
+    }
+  }
+
+  async function saveSettings() {
+    if (!settings || savingSettings) return;
+    setSavingSettings(true);
+    try {
+      const saved = await api.updateAdminSettings({ queueConcurrency: settings.queueConcurrency });
+      setSettings(saved);
+      notify('队列设置已保存');
+    } catch (error) {
+      notify((error as Error).message, 'error');
+    } finally {
+      setSavingSettings(false);
+    }
+  }
+
+  return (
+    <section className="operations-layout">
+      <section className="operations-card">
+        <div className="panel-heading"><div><h2>用户管理</h2><p>{loading ? '正在读取…' : `${users.length} 个账号`}</p></div></div>
+        {!loading && <div className="user-rows">
+          {users.map((user) => (
+            <div className="user-row" key={user.username}>
+              <span className="user-name">{user.username}</span>
+              <select value={user.role} disabled={savingUser === user.username} onChange={(event) => void patchUser(user, { role: event.target.value as 'admin' | 'user' })} aria-label={`${user.username} 的角色`}>
+                <option value="admin">管理员</option>
+                <option value="user">普通用户</option>
+              </select>
+              <input type="password" placeholder="设置新密码（可留空）" value={passwordDrafts[user.username] || ''} onChange={(event) => setPasswordDrafts((current) => ({ ...current, [user.username]: event.target.value }))} autoComplete="new-password" />
+              <button className="button secondary" disabled={savingUser === user.username || !(passwordDrafts[user.username] || '').trim()} onClick={() => void patchUser(user, { password: (passwordDrafts[user.username] || '').trim() })}>{savingUser === user.username ? '保存中…' : '改密'}</button>
+              <button className="text-danger" onClick={() => void removeUser(user)}>删除</button>
+            </div>
+          ))}
+        </div>}
+        <div className="user-create-row">
+          <input placeholder="用户名" value={newUser.username} onChange={(event) => setNewUser((current) => ({ ...current, username: event.target.value }))} autoComplete="off" />
+          <input type="password" placeholder="初始密码" value={newUser.password} onChange={(event) => setNewUser((current) => ({ ...current, password: event.target.value }))} autoComplete="new-password" />
+          <select value={newUser.role} onChange={(event) => setNewUser((current) => ({ ...current, role: event.target.value as 'admin' | 'user' }))} aria-label="新用户角色">
+            <option value="user">普通用户</option>
+            <option value="admin">管理员</option>
+          </select>
+          <button className="button primary" disabled={!newUser.username.trim() || !newUser.password || creatingUser} onClick={() => void createUser()}>{creatingUser ? '创建中…' : '创建用户'}</button>
+        </div>
+        <div className="provider-guide"><strong>账号说明</strong><p>管理员可以进入管理后台并调整模型、密钥和队列；普通用户只能使用工作台创作。修改角色或删除用户会让该账号的现有登录会话立即失效。</p></div>
+      </section>
+
+      <section className="operations-card">
+        <div className="panel-heading"><div><h2>任务队列</h2><p>全局任务队列同时执行的任务数</p></div></div>
+        {settings && <div className="queue-setting-row">
+          <label className="field"><span>并发上限</span>
+            <select value={settings.queueConcurrency} onChange={(event) => setSettings({ ...settings, queueConcurrency: Number(event.target.value) })}>
+              {[1, 2, 3, 4, 5, 6, 7, 8].map((count) => <option key={count} value={count}>{count} 个任务</option>)}
+            </select>
+          </label>
+          <button className="button primary" disabled={savingSettings} onClick={() => void saveSettings()}>{savingSettings ? '保存中…' : '保存设置'}</button>
+        </div>}
+        <div className="provider-guide"><strong>队列说明</strong><p>用户提交的生成任务先进入排队状态，按提交顺序等待空位执行，排队中的任务可以取消且不消耗模型请求。修改并发上限立即生效，重启服务后仍会保留。</p></div>
+      </section>
+    </section>
   );
 }

@@ -50,6 +50,10 @@ export function visionEndpoint(model) {
   return `${baseUrl}${pathSuffix}`;
 }
 
+function normalizeApiKeys(value) {
+  return Array.isArray(value) ? value.map((key) => String(key || '').trim()).filter(Boolean) : [];
+}
+
 export function readModels() {
   try {
     const config = JSON.parse(readFileSync(configPath, 'utf8'));
@@ -60,11 +64,16 @@ export function readModels() {
        const isGemini = model.provider === 'gemini' || /(?:^|\.)generativelanguage\.googleapis\.com$/i.test(host);
        const isGrok = model.provider === 'grok' || /(?:^|\.)x\.ai$/i.test(host);
        const isAgnes = model.provider === 'agnes' || /(?:^|\.)agnes-ai\.com$/i.test(host);
+      // apiKey stays the first pool entry for backwards compatibility with
+      // readers that only look at model.apiKey.
+      const apiKeys = normalizeApiKeys(model.apiKeys);
       return {
         ...model,
         type: model.type === 'vision' ? 'vision' : 'image',
          provider: isSenseNova ? 'sensenova' : isGemini ? 'gemini' : isGrok ? 'grok' : isAgnes ? 'agnes' : 'openai',
         baseUrl,
+        apiKey: model.apiKey || apiKeys[0] || '',
+        apiKeys,
         ...(model.type === 'vision' ? { apiFormat: visionApiFormat({ ...model, baseUrl }) } : {}),
       };
     }) : [];
@@ -81,7 +90,20 @@ export function writeModels(config) {
 }
 
 export function publicModel(model) {
-  return { ...model, apiKey: model.apiKey ? '••••••••' : '' };
+  return { ...model, apiKey: model.apiKey ? '••••••••' : '', apiKeys: normalizeApiKeys(model.apiKeys).map(() => '••••••••') };
+}
+
+// Round-robin over a model's key pool. Rotation state is in-memory only: every
+// dispatch moves to the next key, so concurrent generations spread across the
+// pool and a 429 retry automatically lands on a different key.
+const apiKeyCounters = new Map();
+export function pickApiKey(model) {
+  const pool = (normalizeApiKeys(model?.apiKeys).length ? normalizeApiKeys(model.apiKeys) : (model?.apiKey ? [model.apiKey] : [])).filter(Boolean);
+  if (pool.length <= 1) return pool[0] || model?.apiKey || '';
+  const id = model?.id || model?.model || 'default';
+  const index = (apiKeyCounters.get(id) || 0) % pool.length;
+  apiKeyCounters.set(id, (apiKeyCounters.get(id) || 0) + 1);
+  return pool[index];
 }
 
 export function upsertModel(input, modelId) {
@@ -98,6 +120,21 @@ export function upsertModel(input, modelId) {
   if (existing && config.active_model === existing.id && type === 'vision') {
     throw Object.assign(new Error('当前默认图片生成模型不能改为视觉识别模型，请先设定另一个图片生成默认模型'), { status: 400 });
   }
+  // Resolve the key pool. Masked entries keep their saved counterpart
+  // positionally so the admin UI can submit the full list back unchanged.
+  const submittedKeys = Array.isArray(input.apiKeys) ? input.apiKeys.map((key) => String(key ?? '').trim()) : null;
+  const savedKeys = normalizeApiKeys(existing?.apiKeys);
+  let apiKeys;
+  if (submittedKeys) {
+    apiKeys = submittedKeys
+      .map((key, position) => (key === '••••••••' ? savedKeys[position] || '' : key))
+      .filter(Boolean);
+  } else if (input.apiKey === '••••••••') {
+    apiKeys = savedKeys.length ? savedKeys : (existing?.apiKey ? [existing.apiKey] : []);
+  } else {
+    const singleKey = String(input.apiKey || '').trim();
+    apiKeys = singleKey ? [singleKey] : savedKeys;
+  }
   const model = {
     // Empty IDs make the workbench fall back to the active model. Always assign
     // a stable ID for newly created models, even when the form submits id: ''.
@@ -107,7 +144,8 @@ export function upsertModel(input, modelId) {
     provider,
     ...(type === 'vision' ? { apiFormat: VISION_API_FORMATS.has(input.apiFormat) ? input.apiFormat : visionApiFormat(existing || input) } : {}),
     baseUrl: normalizeBaseUrl(input.baseUrl || defaultBaseUrl),
-    apiKey: input.apiKey === '••••••••' ? existing?.apiKey ?? '' : String(input.apiKey || ''),
+    apiKey: apiKeys[0] || '',
+    apiKeys,
     model: String(input.model || defaultModel),
     capabilities: Array.isArray(input.capabilities) ? input.capabilities : (type === 'vision' ? ['image_understanding'] : ['text_to_image']),
     defaultParams: input.defaultParams && typeof input.defaultParams === 'object' ? input.defaultParams : (type === 'vision' ? {} : { size: '2048x2048', count: 1, quality: 'auto' }),

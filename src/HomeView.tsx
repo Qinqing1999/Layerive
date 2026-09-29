@@ -7,6 +7,7 @@ import type { Project } from './types';
 type Props = {
   projects: Project[];
   loading: boolean;
+  isAdmin: boolean;
   onOpen: (id: string) => void;
   onCreate: (input: { name: string; description: string }) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
@@ -20,7 +21,7 @@ type Props = {
 
 const formatUpdated = (value: string) => new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 
-export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDuplicate, onImport, onRefreshProjects, onModels, onLogout, notify }: Props) {
+export function HomeView({ projects, loading, isAdmin, onOpen, onCreate, onDelete, onDuplicate, onImport, onRefreshProjects, onModels, onLogout, notify }: Props) {
   const { theme, toggleTheme } = useTheme();
   const [query, setQuery] = useState('');
   const [filter, setFilter] = useState<'all' | 'recent' | 'favorite'>('all');
@@ -119,7 +120,7 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
         </div>
         <nav aria-label="主导航">
           <button className="nav-icon active" aria-label="项目"><Icon name="grid" size={19} /></button>
-          <button className="nav-icon" aria-label="模型配置" onClick={onModels}><Icon name="models" size={19} /></button>
+          {isAdmin && <button className="nav-icon" aria-label="管理后台" onClick={onModels}><Icon name="models" size={19} /></button>}
           <button className="nav-icon" aria-label="数据管理" onClick={() => setDataOpen(true)}><Icon name="data" size={19} /></button>
           <button className="nav-icon nav-logout" aria-label="退出登录" onClick={onLogout}><Icon name="close" size={19} /></button>
         </nav>
@@ -127,7 +128,7 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
 
       <nav className="mobile-bottom-nav" aria-label="移动端导航">
         <button className="mobile-nav-item active" aria-label="项目"><Icon name="grid" size={20} /><span>项目</span></button>
-        <button className="mobile-nav-item" aria-label="模型配置" onClick={onModels}><Icon name="models" size={20} /><span>模型</span></button>
+        {isAdmin && <button className="mobile-nav-item" aria-label="管理后台" onClick={onModels}><Icon name="models" size={20} /><span>管理</span></button>}
         <button className="mobile-nav-item" aria-label="数据管理" onClick={() => setDataOpen(true)}><Icon name="data" size={20} /><span>数据</span></button>
         <button className="mobile-nav-item" aria-label="退出登录" onClick={onLogout}><Icon name="close" size={20} /><span>退出</span></button>
       </nav>
@@ -140,7 +141,7 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
               <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={17} />
             </button>
             <button className="button secondary" onClick={() => importRef.current?.click()}>导入项目</button>
-            <button className="button secondary" onClick={onModels}>模型配置</button>
+            {isAdmin && <button className="button secondary" onClick={onModels}>管理后台</button>}
             <button className="button primary" onClick={() => setCreateOpen(true)}><Icon name="plus" size={15} /> 新建项目</button>
           </div>
         </header>
@@ -255,16 +256,21 @@ export function HomeView({ projects, loading, onOpen, onCreate, onDelete, onDupl
           <section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="data-title">
             <div className="modal-heading"><div><p className="eyebrow">DATA</p><h2 id="data-title">数据管理</h2></div><button className="icon-button" onClick={() => setDataOpen(false)}><Icon name="close" size={16} /></button></div>
             <div className="data-actions">
-              <article>
-                <h3>完整备份</h3>
-                <p>打包本地数据库、全部项目图片和模型配置为一个 zip 文件。</p>
-                <button className="button secondary" onClick={() => api.downloadBackup()}>下载完整备份</button>
-              </article>
-              <article>
-                <h3>从备份恢复</h3>
-                <p>选择备份 zip 覆盖当前数据。恢复前会自动创建当前数据的安全备份，恢复后服务会自动重启。</p>
-                <button className="button secondary" disabled={restoring} onClick={() => restoreRef.current?.click()}>{restoring ? '正在恢复…' : '选择备份文件恢复'}</button>
-              </article>
+              {isAdmin ? <>
+                <article>
+                  <h3>完整备份</h3>
+                  <p>打包本地数据库、全部项目图片和模型配置为一个 zip 文件。</p>
+                  <button className="button secondary" onClick={() => api.downloadBackup()}>下载完整备份</button>
+                </article>
+                <article>
+                  <h3>从备份恢复</h3>
+                  <p>选择备份 zip 覆盖当前数据。恢复前会自动创建当前数据的安全备份，恢复后服务会自动重启。</p>
+                  <button className="button secondary" disabled={restoring} onClick={() => restoreRef.current?.click()}>{restoring ? '正在恢复…' : '选择备份文件恢复'}</button>
+                </article>
+              </> : <article>
+                <h3>项目数据</h3>
+                <p>完整备份与恢复仅对管理员开放。普通用户可以正常导入和导出单个项目。</p>
+              </article>}
             </div>
           </section>
         </div>

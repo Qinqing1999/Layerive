@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 import { readZip } from './zip.mjs';
+import { authHeaders, login } from './test-auth.mjs';
 
 const solid = (width, height, background) => sharp({ create: { width, height, channels: 4, background } }).png().toBuffer();
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -101,9 +102,11 @@ test('generate API: automatic multi-image intent, concurrency, retry, ZIP and pr
   });
   await waitUntil(() => /127\.0\.0\.1:\d+/.test(logs), 10000);
   const base = logs.match(/http:\/\/127\.0\.0\.1:\d+/)[0];
+  const token = await login(base);
+  const auth = authHeaders(token);
 
   async function request(url, body, expected = 200) {
-    const response = await fetch(`${base}/api${url}`, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const response = await fetch(`${base}/api${url}`, body === undefined ? { headers: auth } : { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const payload = await response.json();
     assert.equal(response.status, expected, JSON.stringify(payload));
     return payload;
@@ -147,7 +150,7 @@ test('generate API: automatic multi-image intent, concurrency, retry, ZIP and pr
     assert.deepEqual(result.content.prompts, visionPrompts);
     assert.equal(result.content.promptMode, 'different');
     assert.equal(result.content.outputImageIds.length, 4);
-    const download = await fetch(`${base}/api/projects/${fixture.projectId}/versions/${version.id}/download`);
+    const download = await fetch(`${base}/api/projects/${fixture.projectId}/versions/${version.id}/download`, { headers: auth });
     assert.equal(download.status, 200);
     assert.match(download.headers.get('content-type'), /application\/zip/);
     assert.match(download.headers.get('content-disposition'), /layerive-V\d+-4-images\.zip/);

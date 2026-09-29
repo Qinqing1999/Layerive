@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "像素变换",
+    "slug": "pixel-forge",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "scheme": "pixelforge",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "splash": {
+      "backgroundColor": "#6d55f7",
+      "resizeMode": "contain"
+    },
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.pixelforge.app",
+      "infoPlist": {
+        "NSCameraUsageDescription": "用于上传图片进行 AI 创作",
+        "NSPhotoLibraryUsageDescription": "用于选择图片进行 AI 创作"
+      }
+    },
+    "android": {
+      "package": "com.pixelforge.app",
+      "adaptiveIcon": {
+        "backgroundColor": "#6d55f7"
+      }
+    },
+    "plugins": [
+      "expo-image-picker",
+      "expo-asset",
+      ["expo-build-properties", { "android": { "usesCleartextTraffic": true } }]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "pixelforge"
+      }
+    }
+  }
+}

@@ -7,6 +7,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
 import { composeLocalReference, normalizeLocalImage, normalizeSenseNovaInput, pixelRect, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
+import { authHeaders, login } from './test-auth.mjs';
 
 const rect = { x: 25, y: 20, width: 50, height: 60 };
 const plan = { intent: '将目标替换为参考主体', target_rect: { x: 30, y: 25, width: 30, height: 40 }, reference_rect: { x: 20, y: 10, width: 60, height: 70 }, edit_prompt: '自然融合参考主体，修复边缘与光影，保留框外内容。' };
@@ -124,8 +125,10 @@ test('local edit API: all vision formats, composed provider input, history, fail
   });
   await waitUntil(() => /127\.0\.0\.1:\d+/.test(logs), 10000);
   const base = logs.match(/http:\/\/127\.0\.0\.1:\d+/)[0];
+  const token = await login(base);
+  const auth = authHeaders(token);
   async function request(url, body, expected = 200) {
-    const response = await fetch(`${base}/api${url}`, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const response = await fetch(`${base}/api${url}`, body === undefined ? { headers: auth } : { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
     const payload = await response.json();
     assert.equal(response.status, expected, JSON.stringify(payload));
     return payload;

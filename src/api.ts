@@ -1,4 +1,4 @@
-import type { BatchEditProgress, BatchEditResult, GenerateResult, GenerationTask, GalleryEntryItem, LocalEditReference, ModelConfig, ModelsPayload, Project, ProjectBundle, ProjectImage, TextSegment } from './types';
+import type { AdminSettings, AdminUser, BatchEditProgress, BatchEditResult, GenerateResult, GenerationTask, GalleryEntryItem, LocalEditReference, ModelConfig, ModelsPayload, Project, ProjectBundle, ProjectImage, TextSegment } from './types';
 
 let authToken: string | null = localStorage.getItem('layerive-auth-token');
 
@@ -57,8 +57,8 @@ async function downloadFile(url: string) {
 }
 
 export const api = {
-  login: (username: string, password: string) => request<{ token: string }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
-  checkAuth: () => request<{ authenticated: boolean }>('/api/auth/check'),
+  login: (username: string, password: string) => request<{ token: string; username: string; role: 'admin' | 'user' }>('/api/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }),
+  checkAuth: () => request<{ authenticated: boolean; username: string; role: string }>('/api/auth/check'),
   logout: () => request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
   listProjects: () => request<{ projects: Project[] }>('/api/projects'),
   createProject: (input: { name: string; description?: string; defaultModelId?: string }) =>
@@ -129,6 +129,15 @@ export const api = {
   activateVisionModel: (id: string) => request<{ ok: boolean }>(`/api/models/${id}/activate-vision`, { method: 'POST' }),
   testModel: (id: string) => request<{ ok: boolean; latency: number; message: string }>(`/api/models/${id}/test`, { method: 'POST' }),
   testModelConfig: (input: Partial<ModelConfig>) => request<{ ok: boolean; latency: number; message: string }>('/api/models/test-config', { method: 'POST', body: JSON.stringify(input) }),
+  // ---- 管理后台（仅管理员，服务端 requireAdmin 校验） ----
+  adminUsers: () => request<{ users: AdminUser[] }>('/api/admin/users'),
+  createAdminUser: (input: { username: string; password: string; role: 'admin' | 'user' }) =>
+    request<{ user: AdminUser }>('/api/admin/users', { method: 'POST', body: JSON.stringify(input) }),
+  updateAdminUser: (username: string, input: { password?: string; role?: 'admin' | 'user' }) =>
+    request<{ user: AdminUser }>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'PATCH', body: JSON.stringify(input) }),
+  deleteAdminUser: (username: string) => request<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
+  adminSettings: () => request<AdminSettings>('/api/admin/settings'),
+  updateAdminSettings: (input: Partial<AdminSettings>) => request<AdminSettings>('/api/admin/settings', { method: 'PUT', body: JSON.stringify(input) }),
 };
 
 export function readFileAsDataUrl(file: File) {

@@ -5,6 +5,7 @@ import { once } from 'node:events';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'node:test';
+import { authHeaders, login } from './test-auth.mjs';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -38,9 +39,10 @@ test('SenseNova connection test does not turn a server error into success', { ti
   for (let i = 0; i < 100 && !/127\.0\.0\.1:\d+/.test(logs); i += 1) await pause(30);
   const base = logs.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
   assert.ok(base, logs);
+  const auth = authHeaders(await login(base));
   const testConfig = async () => {
     const response = await fetch(`${base}/api/models/test-config`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
       body: JSON.stringify({ type: 'image', provider: 'sensenova', baseUrl: providerUrl, apiKey: 'fixture-key', model: 'fixture' }),
     });
     return { status: response.status, body: await response.json() };

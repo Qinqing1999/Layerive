@@ -14,7 +14,7 @@ import path from 'node:path';
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // fetch() refuses to set Host and Sec-Fetch-*, so drive the socket directly.
-function send(base, requestPath, headers = {}, method = 'GET') {
+function send(base, requestPath, headers = {}, method = 'GET', body) {
   const target = new URL(base + requestPath);
   return new Promise((resolve, reject) => {
     const request = http.request({ host: target.hostname, port: target.port, path: target.pathname + target.search, method, headers }, async (response) => {
@@ -23,6 +23,7 @@ function send(base, requestPath, headers = {}, method = 'GET') {
       resolve({ status: response.statusCode, headers: response.headers, body: Buffer.concat(chunks).toString('utf8') });
     });
     request.on('error', reject);
+    if (body) request.write(body);
     request.end();
   });
 }
@@ -74,14 +75,35 @@ test('the local service answers the local UI only', { timeout: 30000 }, async (t
     assert.equal(response.headers['access-control-allow-origin'], undefined, `${route} must not grant cross-origin reads`);
   }
 
-  // The UI itself keeps working: same-origin in production and Electron, and
-  // through the Vite dev proxy, which forwards the 5173 origin.
-  assert.equal((await send(base, '/api/projects', { Origin: origin, 'Sec-Fetch-Site': 'same-origin' })).status, 200);
-  assert.equal((await send(base, '/api/projects', { Origin: 'http://127.0.0.1:5173', 'Sec-Fetch-Site': 'same-site' })).status, 200);
-  assert.equal((await send(base, '/api/projects', { Origin: 'http://localhost:5173' })).status, 200);
+  // The UI itself must still prove a session: same-origin requests without a
+  // token reach the guard but are rejected by the auth layer.
+  assert.equal((await send(base, '/api/projects', { Origin: origin, 'Sec-Fetch-Site': 'same-origin' })).status, 401);
+  assert.equal((await send(base, '/api/projects', { Origin: 'http://127.0.0.1:5173', 'Sec-Fetch-Site': 'same-site' })).status, 401);
+  assert.equal((await send(base, '/api/projects', { Origin: 'http://localhost:5173' })).status, 401);
+
+  // Logging in (no browser fetch metadata, like curl) issues a session token.
+  const loginResponse = await send(base, '/api/auth/login', { 'Content-Type': 'application/json' }, 'POST',
+    JSON.stringify({ username: 'admin', password: 'admin' }));
+  assert.equal(loginResponse.status, 200);
+  const { token } = JSON.parse(loginResponse.body);
+  assert.ok(token);
+  const authed = { Authorization: `Bearer ${token}` };
+
+  // Authenticated UI requests go through.
+  assert.equal((await send(base, '/api/projects', { ...authed, Origin: origin, 'Sec-Fetch-Site': 'same-origin' })).status, 200);
+  assert.equal((await send(base, '/api/projects', authed)).status, 200);
+  // The mobile app contract: a valid session replaces the local-origin checks,
+  // so a LAN device with a non-local Host header is served too — without ever
+  // granting cross-origin read permission to browser pages (they have no token).
+  assert.equal((await send(base, '/api/projects', { ...authed, Host: '192.168.1.7' })).status, 200);
+  const lanResponse = await send(base, '/api/backup', { ...authed, Host: '192.168.1.7' });
+  assert.equal(lanResponse.status, 200);
+  assert.equal(lanResponse.headers['access-control-allow-origin'], undefined);
+
   // Typing the address or opening a bookmark sends Sec-Fetch-Site: none.
   assert.equal((await send(base, '/api/health', { 'Sec-Fetch-Site': 'none' })).status, 200);
   // Non-browser callers (curl, this suite, the Electron health probe) send no
-  // fetch metadata and no ambient credentials.
+  // fetch metadata and no ambient credentials. Health stays open; data routes
+  // still need a session.
   assert.equal((await send(base, '/api/health')).status, 200);
 });

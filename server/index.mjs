@@ -1,41 +1,62 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { readFile, writeFile, readdir } from 'node:fs/promises';
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync, createReadStream, statSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, createReadStream, statSync } from 'node:fs';
 import sharp from 'sharp';
 import { DatabaseSync } from 'node:sqlite';
 import path from 'node:path';
 import { APP_ROOT, CONFIG_ROOT, DATA_ROOT, db, closeDatabase, ensureProjectDirs, GALLERY_ROOT, imageDto, now, parseJson, PROJECTS_ROOT, projectDto, uid } from './db.mjs';
 import { makeDemoPng, makeThumbnailPng, readImageDimensions } from './png.mjs';
-import { isSenseNovaLegacyVisionEndpoint, isSenseNovaTokenChatEndpoint, normalizeBaseUrl, publicModel, readModels, removeModel, upsertModel, visionApiFormat, visionEndpoint, writeModels } from './models.mjs';
+import { isSenseNovaLegacyVisionEndpoint, isSenseNovaTokenChatEndpoint, normalizeBaseUrl, pickApiKey, publicModel, readModels, removeModel, upsertModel, visionApiFormat, visionEndpoint, writeModels } from './models.mjs';
+import { createUser, deleteUser, listUsersPublic, updateUser, verifyLogin } from './users.mjs';
 import { createZip, readZip } from './zip.mjs';
 import { composeLocalReference, normalizeLocalImage, normalizeSenseNovaInput, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
 
 const PORT = Number(process.env.PIXELFLOW_API_PORT || 8788);
-const HOST = '127.0.0.1';
+// Loopback by default. PIXELFLOW_API_HOST=0.0.0.0 opts in to LAN access for the
+// mobile app; every /api route still requires a valid session token.
+const HOST = process.env.PIXELFLOW_API_HOST || '127.0.0.1';
 const DIST_ROOT = path.join(APP_ROOT, 'dist');
 const MODELS_CONFIG_PATH = path.join(CONFIG_ROOT, 'models.json');
 
-// ---- Simple session-based auth ----
-const AUTH_USERNAME = 'admin';
-const AUTH_PASSWORD = 'admin';
+// ---- Simple session-based auth (multi-user with roles) ----
 const SESSIONS_PATH = path.join(DATA_ROOT, 'sessions.json');
-const sessions = new Set();
+// token -> { username, role, createdAt }. Roles come from users.json; 'admin'
+// reaches the management page, 'user' works inside projects only.
+const sessions = new Map();
 try {
   const raw = await readFile(SESSIONS_PATH, 'utf-8').catch(() => '[]');
-  for (const token of JSON.parse(raw || '[]')) sessions.add(token);
+  const parsed = JSON.parse(raw || '[]');
+  // Legacy sessions were plain token strings issued to the single built-in
+  // admin account; keep them valid across the upgrade.
+  for (const entry of Array.isArray(parsed) ? parsed : []) {
+    if (typeof entry === 'string') sessions.set(entry, { username: 'admin', role: 'admin', createdAt: now() });
+    else if (entry && typeof entry.token === 'string') {
+      sessions.set(entry.token, { username: String(entry.username || 'admin'), role: entry.role === 'user' ? 'user' : 'admin', createdAt: Number(entry.createdAt) || now() });
+    }
+  }
 } catch { /* ignore */ }
 async function saveSessions() {
-  await writeFile(SESSIONS_PATH, JSON.stringify([...sessions]), 'utf-8').catch(() => {});
+  await writeFile(SESSIONS_PATH, JSON.stringify([...sessions.entries()].map(([token, session]) => ({ token, ...session }))), 'utf-8').catch(() => {});
 }
-function createSession() {
+function createSession(user) {
   const token = uid() + uid();
-  sessions.add(token);
+  sessions.set(token, { username: user.username, role: user.role, createdAt: now() });
   void saveSessions();
   return token;
 }
 function isValidSession(token) {
   return typeof token === 'string' && sessions.has(token);
+}
+function getSession(token) {
+  return isValidSession(token) ? sessions.get(token) : null;
+}
+function revokeUserSessions(username) {
+  let removed = false;
+  for (const [token, session] of sessions.entries()) {
+    if (session.username === username) { sessions.delete(token); removed = true; }
+  }
+  if (removed) void saveSessions();
 }
 function getBearerToken(req) {
   const header = req.headers['authorization'] || '';
@@ -43,16 +64,26 @@ function getBearerToken(req) {
   return '';
 }
 function requireAuth(req) {
-  if (!isValidSession(getBearerToken(req))) {
+  const session = getSession(getBearerToken(req));
+  if (!session) {
     throw Object.assign(new Error('未登录或会话已过期'), { status: 401 });
   }
+  return session;
+}
+function requireAdmin(req) {
+  const session = requireAuth(req);
+  if (session.role !== 'admin') {
+    throw Object.assign(new Error('需要管理员权限'), { status: 403 });
+  }
+  return session;
 }
 
 // Tasks still marked `generating` when the server starts can never finish —
-// the request died with the previous process. Mark them instead of leaving
+// the request died with the previous process. Queued tasks whose executor also
+// died with the previous process can never start. Mark both instead of leaving
 // the workspace stuck on a phantom progress state.
 const startupRecoveryAt = now();
-db.prepare("UPDATE generation_tasks SET status = 'failed', error_json = ?, finished_at = ? WHERE status = 'generating'")
+db.prepare("UPDATE generation_tasks SET status = 'failed', error_json = ?, finished_at = ? WHERE status IN ('generating', 'queued')")
   .run(JSON.stringify({ message: '应用重启，任务已中断，请重新发送。' }), startupRecoveryAt);
 // A batch version is published incrementally. Preserve completed outputs
 // after a restart, but hide an empty placeholder version that never produced an
@@ -80,6 +111,24 @@ let restoreInProgress = false;
 const activeServiceRequests = new Set();
 let idleRequestResolvers = [];
 
+// ---- Server settings (management page) ----
+const SETTINGS_PATH = path.join(DATA_ROOT, 'settings.json');
+const clampConcurrency = (value) => Math.min(8, Math.max(1, Math.trunc(Number(value) || 2)));
+function readSettings() {
+  try {
+    const settings = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'));
+    return { queueConcurrency: clampConcurrency(settings?.queueConcurrency) };
+  } catch { /* missing or malformed file falls back to the default */ }
+  return { queueConcurrency: 2 };
+}
+async function writeSettings(input) {
+  const concurrency = Number(input?.queueConcurrency);
+  if (!Number.isFinite(concurrency)) throw Object.assign(new Error('队列并发数必须是 1–8 的整数'), { status: 400 });
+  const settings = { queueConcurrency: clampConcurrency(concurrency) };
+  await writeFile(SETTINGS_PATH, `${JSON.stringify(settings, null, 2)}\n`, 'utf-8').catch(() => {});
+  return settings;
+}
+
 const BACKUP_REQUIRED_SCHEMA = {
   projects: ['id', 'name', 'description', 'cover_image_id', 'default_model_id', 'current_version_id', 'current_image_id', 'draft_json', 'is_favorite', 'deleted_at', 'created_at', 'updated_at'],
   messages: ['id', 'project_id', 'role', 'message_type', 'content_json', 'created_at'],
@@ -96,6 +145,81 @@ const BACKUP_OPTIONAL_SCHEMA = {
   gallery_entries: ['id', 'title', 'category', 'prompt', 'style_prompt', 'image_path', 'source', 'created_at', 'updated_at'],
 };
 
+// ---- Global task queue ----
+// Every generation-style task enters this FIFO queue first. The pump keeps at
+// most `queueConcurrency` tasks running (management-page setting, default 2).
+// A queued task only receives its AbortController and timeout budget when it
+// actually starts, so waiting in line never burns the timeout.
+const pendingTasks = [];
+let activeTaskCount = 0;
+let queueDrainedForRestore = false;
+
+function enqueueTask(taskId, start) {
+  if (restoreInProgress || queueDrainedForRestore) throw restoringError();
+  pendingTasks.push({ taskId, canceled: false, start });
+  pumpQueue();
+}
+
+function pumpQueue() {
+  // restoreInProgress blocks dispatch as well: aborted tasks still decrement
+  // activeTaskCount through trackTask's finally while the restore route has
+  // not reached drainQueueForRestore() yet, and nothing may start in between.
+  while (!restoreInProgress && !queueDrainedForRestore && activeTaskCount < readSettings().queueConcurrency && pendingTasks.length) {
+    const entry = pendingTasks.shift();
+    if (!entry || entry.canceled) continue;
+    activeTaskCount += 1;
+    // Queued tasks carry no started_at yet; stamp it when execution begins so
+    // the history list orders by actual start time.
+    db.prepare("UPDATE generation_tasks SET status = 'generating', started_at = ? WHERE id = ?").run(now(), entry.taskId);
+    entry.start();
+  }
+}
+
+// A queued task that is canceled or drained before dispatch never runs, so its
+// cancellation bookkeeping (assistant message + pre-created version cleanup)
+// happens right here instead of inside a task runner.
+function finalizeQueuedCancel(task) {
+  const finishedAt = now();
+  const message = '任务已取消（尚未开始执行）。';
+  const input = parseJson(task.input_json, {});
+  db.exec('BEGIN');
+  try {
+    db.prepare("UPDATE generation_tasks SET status = 'canceled', error_json = ?, finished_at = ? WHERE id = ?")
+      .run(JSON.stringify({ message }), finishedAt, task.id);
+    if (input.versionId) {
+      const hasOutput = db.prepare('SELECT 1 FROM images WHERE version_id = ? LIMIT 1').get(input.versionId);
+      if (hasOutput) db.prepare("UPDATE image_versions SET status = 'partial', deleted_at = NULL WHERE id = ?").run(input.versionId);
+      else db.prepare("UPDATE image_versions SET status = 'canceled', deleted_at = ? WHERE id = ?").run(finishedAt, input.versionId);
+    }
+    db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)')
+      .run(uid(), task.project_id, 'assistant', 'canceled', JSON.stringify({ message, taskId: task.id }), finishedAt);
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    console.error(`取消排队任务 ${task.id} 失败：`, error);
+  }
+}
+
+function cancelQueuedTask(task) {
+  const entry = pendingTasks.find((item) => item.taskId === task.id);
+  if (entry) entry.canceled = true;
+  finalizeQueuedCancel(task);
+  pumpQueue();
+}
+
+// Restore swaps the whole database, so queued tasks would point at rows that no
+// longer exist. Finalize every pending entry as canceled and stop the pump; the
+// process restarts once the restore response is flushed anyway.
+function drainQueueForRestore() {
+  const entries = pendingTasks.splice(0, pendingTasks.length);
+  for (const entry of entries) {
+    if (entry.canceled) continue;
+    const task = db.prepare('SELECT * FROM generation_tasks WHERE id = ?').get(entry.taskId);
+    if (task && task.status === 'queued') finalizeQueuedCancel(task);
+  }
+  queueDrainedForRestore = true;
+}
+
 function trackTask(taskId, controller, timer, work) {
   runningTasks.set(taskId, controller);
   const completion = Promise.resolve().then(work).catch((error) => {
@@ -107,6 +231,8 @@ function trackTask(taskId, controller, timer, work) {
     runningTasks.delete(taskId);
     runningTaskCompletions.delete(taskId);
     canceledTasks.delete(taskId);
+    activeTaskCount = Math.max(0, activeTaskCount - 1);
+    pumpQueue();
   });
   runningTaskCompletions.set(taskId, completion);
   void completion;
@@ -171,6 +297,14 @@ function isLocalHostname(value) {
 // no ambient credentials and stay allowed.
 function assertLocalUiRequest(req) {
   const deny = () => { throw Object.assign(new Error('仅允许本机应用访问本地服务'), { status: 403 }); };
+  // The mobile app reaches the server over the LAN with a session token issued
+  // by /api/auth/login. Browser pages on other sites cannot obtain that token
+  // (it lives in the server's sessions file and the user's logged-in app), so a
+  // valid session is accepted in place of the local-origin evidence below —
+  // including for /files/ and /gallery-files/ image requests, which carry the
+  // token in an Authorization header. Everything else still needs a local Host
+  // header, which keeps DNS-rebinding and cross-site reads blocked.
+  if (isValidSession(getBearerToken(req))) return;
   const fetchSite = String(req.headers['sec-fetch-site'] || '');
   if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) deny();
   const origin = String(req.headers.origin || '');
@@ -244,7 +378,7 @@ function remapProjectDraft(value, maps) {
 }
 
 function copiedTaskState(row, timestamp) {
-  if (row.status !== 'generating') return { status: row.status, errorJson: row.error_json, finishedAt: row.finished_at };
+  if (row.status !== 'generating' && row.status !== 'queued') return { status: row.status, errorJson: row.error_json, finishedAt: row.finished_at };
   return {
     status: 'failed',
     errorJson: JSON.stringify({ message: '项目复制时未完成的任务已中断，请重新发送。' }),
@@ -539,11 +673,13 @@ function abortableDelay(ms, signal) {
 }
 
 // Two retries with a short backoff absorb transient RPS limits without
-// pushing a 4-image task past its count-scaled total timeout.
+// pushing a 4-image task past its count-scaled total timeout. Each attempt
+// re-picks from the model's key pool, so a rate-limited key rotates to the
+// next one instead of hammering the same account.
 async function callImageWithRetry(model, prompt, params, inputImage, signal) {
   for (let attempt = 0; ; attempt += 1) {
     try {
-      return await callImageProvider(model, prompt, params, inputImage, signal);
+      return await callImageProvider({ ...model, apiKey: pickApiKey(model) }, prompt, params, inputImage, signal);
     } catch (error) {
       if (!isRateLimitError(error) || attempt >= 2 || signal.aborted) throw error;
       await abortableDelay(error.retryAfterMs || [1500, 4000][attempt], signal);
@@ -654,7 +790,8 @@ function visionModelFingerprint(model) {
 }
 
 async function callVision(model, image, instruction, signal) {
-  if (!model?.apiKey) throw Object.assign(new Error('请先在模型配置中填写视觉识别模型的 API Key'), { status: 400 });
+  const apiKey = pickApiKey(model);
+  if (!apiKey) throw Object.assign(new Error('请先在模型配置中填写视觉识别模型的 API Key'), { status: 400 });
   // image 通常来自数据库行（按 file_path 读盘）；gallery 分析直接携带 buffer。
   const images = await Promise.all((Array.isArray(image) ? image : [image]).map(async (item) => {
     const encoded = (item.buffer || await readFile(path.join(PROJECTS_ROOT, item.project_id, item.file_path))).toString('base64');
@@ -667,9 +804,9 @@ async function callVision(model, image, instruction, signal) {
   const apiFormat = visionApiFormat(model);
   const headers = apiFormat === 'anthropic_messages'
     ? isDots
-      ? { 'api-key': model.apiKey, 'Content-Type': 'application/json' }
-      : { 'x-api-key': model.apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
-    : { Authorization: `Bearer ${model.apiKey}`, 'Content-Type': 'application/json' };
+      ? { 'api-key': apiKey, 'Content-Type': 'application/json' }
+      : { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+    : { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
   const requestBody = apiFormat === 'anthropic_messages'
     ? {
       model: model.model,
@@ -702,6 +839,10 @@ async function callVision(model, image, instruction, signal) {
   return content;
 }
 
+// The workbench no longer lets users pick an image model, and clients may omit
+// visionModelId entirely. An explicitly requested vision model is still honored
+// (and strictly validated) because edit-text caches and specialized flows key
+// off it; callers that omit it get the admin-configured default vision model.
 function visionModelOrThrow(config, requestedModelId) {
   const requestedId = String(requestedModelId || '').trim();
   if (requestedId) {
@@ -1114,6 +1255,8 @@ function startGeneration(projectId, input, localEdit = null, textEdit = null) {
   projectOrThrow(projectId);
   ensureProjectDirs(projectId);
   const config = readModels();
+  // Clients may omit modelId and run on the admin-managed default model; an
+  // explicit modelId is still honored (strictly validated) for API callers.
   const requestedModelId = String(input.modelId || '').trim();
   const model = config.models.find((item) => item.id === (requestedModelId || config.active_model));
   if (!model) throw Object.assign(new Error('请选择有效模型'), { status: 400 });
@@ -1146,15 +1289,19 @@ function startGeneration(projectId, input, localEdit = null, textEdit = null) {
     ...(textEdit ? { textEdit } : {}),
   };
   db.prepare(`INSERT INTO generation_tasks (id, project_id, user_message_id, operation_type, model_id, model_snapshot_json, params_json, input_json, status, started_at, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'generating', ?, ?)`)
-    .run(taskId, projectId, userMessageId, operation, model.id, JSON.stringify({ ...model, apiKey: undefined }), JSON.stringify(params), JSON.stringify(taskInput), createdAt, createdAt);
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', NULL, ?)`)
+    .run(taskId, projectId, userMessageId, operation, model.id, JSON.stringify({ ...model, apiKey: undefined, apiKeys: undefined }), JSON.stringify(params), JSON.stringify(taskInput), createdAt);
 
-  const controller = new AbortController();
-  // Batches fan out under a concurrency cap and may absorb rate-limit backoff,
-  // so the total budget grows with the requested image count.
-  const timer = setTimeout(() => controller.abort(new Error('timeout')), localEdit ? 300000 : 120000 + (params.count - 1) * 30000 + (autoPromptMode ? 60000 : 0));
-  trackTask(taskId, controller, timer, () => runGenerationTask(projectId, taskId, { model, prompt, operation, params, inputImage, parentVersionId: input.parentVersionId || null, controller, localEdit, textEdit, autoPromptMode, promptVisionModel }));
-  return { taskId, status: 'generating', userMessageId };
+  // The task waits in the global FIFO queue; the AbortController and timeout
+  // budget only materialize once the pump dispatches it.
+  enqueueTask(taskId, () => {
+    const controller = new AbortController();
+    // Batches fan out under a concurrency cap and may absorb rate-limit backoff,
+    // so the total budget grows with the requested image count.
+    const timer = setTimeout(() => controller.abort(new Error('timeout')), localEdit ? 300000 : 120000 + (params.count - 1) * 30000 + (autoPromptMode ? 60000 : 0));
+    trackTask(taskId, controller, timer, () => runGenerationTask(projectId, taskId, { model, prompt, operation, params, inputImage, parentVersionId: input.parentVersionId || null, controller, localEdit, textEdit, autoPromptMode, promptVisionModel }));
+  });
+  return { taskId, status: 'queued', userMessageId };
 }
 
 async function runGenerationTask(projectId, taskId, context) {
@@ -1446,8 +1593,8 @@ function startBatchEdit(projectId, input) {
   try {
     db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)').run(userMessageId, projectId, 'user', 'prompt', JSON.stringify({ prompt: batchPromptSummary(validated), operation: 'batch_edit', inputImageId: source.id, params: { ...params, quantity: validated.quantity }, modelName: model.name, batch: batchMessageBatch(validated, {}) }), createdAt);
     db.prepare(`INSERT INTO generation_tasks (id, project_id, user_message_id, operation_type, model_id, model_snapshot_json, params_json, input_json, status, started_at, created_at)
-      VALUES (?, ?, ?, 'batch_edit', ?, ?, ?, ?, 'generating', ?, ?)`)
-      .run(taskId, projectId, userMessageId, model.id, JSON.stringify({ ...model, apiKey: undefined }), JSON.stringify(params), JSON.stringify(taskInput), createdAt, createdAt);
+      VALUES (?, ?, ?, 'batch_edit', ?, ?, ?, ?, 'queued', NULL, ?)`)
+      .run(taskId, projectId, userMessageId, model.id, JSON.stringify({ ...model, apiKey: undefined, apiKeys: undefined }), JSON.stringify(params), JSON.stringify(taskInput), createdAt);
     db.prepare(`INSERT INTO image_versions (id, project_id, task_id, parent_version_id, version_number, operation_type, selected_image_id, status, created_at)
       VALUES (?, ?, ?, ?, ?, 'batch_edit', NULL, 'generating', ?)`)
       .run(versionId, projectId, taskId, input.parentVersionId || source.version_id || null, versionNumber, createdAt);
@@ -1455,11 +1602,13 @@ function startBatchEdit(projectId, input) {
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 
-  const controller = new AbortController();
-  const timeoutMs = Math.min(3 * 60 * 60 * 1000, 120000 + validated.quantity * 180000);
-  const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
-  trackTask(taskId, controller, timer, () => runBatchEditTask(projectId, taskId, { model, source, params, versionId, versionNumber, validated, controller }));
-  return { taskId, versionId, status: 'generating', userMessageId };
+  enqueueTask(taskId, () => {
+    const controller = new AbortController();
+    const timeoutMs = Math.min(3 * 60 * 60 * 1000, 120000 + validated.quantity * 180000);
+    const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+    trackTask(taskId, controller, timer, () => runBatchEditTask(projectId, taskId, { model, source, params, versionId, versionNumber, validated, controller }));
+  });
+  return { taskId, versionId, status: 'queued', userMessageId };
 }
 
 async function runBatchEditTask(projectId, taskId, context) {
@@ -1612,19 +1761,21 @@ function startBatchGenerate(projectId, input) {
   try {
     db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)').run(userMessageId, projectId, 'user', 'prompt', JSON.stringify({ prompt: promptSummary, operation: 'batch_generate', params: { ...params, quantity: validated.quantity }, modelName: model.name, batch: batchMessageBatch(validated, {}) }), createdAt);
     db.prepare(`INSERT INTO generation_tasks (id, project_id, user_message_id, operation_type, model_id, model_snapshot_json, params_json, input_json, status, started_at, created_at)
-      VALUES (?, ?, ?, 'batch_generate', ?, ?, ?, ?, 'generating', ?, ?)`)
-      .run(taskId, projectId, userMessageId, model.id, JSON.stringify({ ...model, apiKey: undefined }), JSON.stringify(params), JSON.stringify(taskInput()), createdAt, createdAt);
+      VALUES (?, ?, ?, 'batch_generate', ?, ?, ?, ?, 'queued', NULL, ?)`)
+      .run(taskId, projectId, userMessageId, model.id, JSON.stringify({ ...model, apiKey: undefined, apiKeys: undefined }), JSON.stringify(params), JSON.stringify(taskInput()), createdAt);
     db.prepare(`INSERT INTO image_versions (id, project_id, task_id, parent_version_id, version_number, operation_type, selected_image_id, status, created_at)
       VALUES (?, ?, ?, ?, ?, 'batch_generate', NULL, 'generating', ?)`)
       .run(versionId, projectId, taskId, input.parentVersionId || null, versionNumber, createdAt);
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 
-  const controller = new AbortController();
-  const timeoutMs = Math.min(3 * 60 * 60 * 1000, 120000 + validated.quantity * 180000);
-  const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
-  trackTask(taskId, controller, timer, () => runBatchGenerateTask(projectId, taskId, { model, params, versionId, versionNumber, validated, stylePrompt, promptSummary, taskInput, controller }));
-  return { taskId, versionId, status: 'generating', userMessageId };
+  enqueueTask(taskId, () => {
+    const controller = new AbortController();
+    const timeoutMs = Math.min(3 * 60 * 60 * 1000, 120000 + validated.quantity * 180000);
+    const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+    trackTask(taskId, controller, timer, () => runBatchGenerateTask(projectId, taskId, { model, params, versionId, versionNumber, validated, stylePrompt, promptSummary, taskInput, controller }));
+  });
+  return { taskId, versionId, status: 'queued', userMessageId };
 }
 
 async function runBatchGenerateTask(projectId, taskId, context) {
@@ -1780,8 +1931,8 @@ function startLocalEditBatch(projectId, input) {
   try {
     db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)').run(userMessageId, projectId, 'user', 'prompt', JSON.stringify({ prompt: promptSummary, operation: 'local_edit', inputImageId: source.id, params: { ...params, quantity: instructions.length }, modelName: model.name, batch: { local: true, prompts: instructions } }), createdAt);
     db.prepare(`INSERT INTO generation_tasks (id, project_id, user_message_id, operation_type, model_id, model_snapshot_json, params_json, input_json, status, started_at, created_at)
-      VALUES (?, ?, ?, 'batch_edit', ?, ?, ?, ?, 'generating', ?, ?)`)
-      .run(taskId, projectId, userMessageId, model.id, JSON.stringify({ ...model, apiKey: undefined }), JSON.stringify(params), JSON.stringify(taskInput), createdAt, createdAt);
+      VALUES (?, ?, ?, 'batch_edit', ?, ?, ?, ?, 'queued', NULL, ?)`)
+      .run(taskId, projectId, userMessageId, model.id, JSON.stringify({ ...model, apiKey: undefined, apiKeys: undefined }), JSON.stringify(params), JSON.stringify(taskInput), createdAt);
     db.prepare(`INSERT INTO image_versions (id, project_id, task_id, parent_version_id, version_number, operation_type, selected_image_id, status, created_at)
       VALUES (?, ?, ?, ?, ?, 'local_edit', NULL, 'generating', ?)`)
       .run(versionId, projectId, taskId, input.parentVersionId || source.version_id || null, versionNumber, createdAt);
@@ -1789,11 +1940,13 @@ function startLocalEditBatch(projectId, input) {
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
 
-  const controller = new AbortController();
-  const timeoutMs = Math.min(3 * 60 * 60 * 1000, 120000 + instructions.length * 240000);
-  const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
-  trackTask(taskId, controller, timer, () => runLocalEditBatchTask(projectId, taskId, { model, source, params, versionId, versionNumber, rect, reference, visionModel, instructions, promptSummary, controller }));
-  return { taskId, versionId, status: 'generating', userMessageId };
+  enqueueTask(taskId, () => {
+    const controller = new AbortController();
+    const timeoutMs = Math.min(3 * 60 * 60 * 1000, 120000 + instructions.length * 240000);
+    const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
+    trackTask(taskId, controller, timer, () => runLocalEditBatchTask(projectId, taskId, { model, source, params, versionId, versionNumber, rect, reference, visionModel, instructions, promptSummary, controller }));
+  });
+  return { taskId, versionId, status: 'queued', userMessageId };
 }
 
 async function runLocalEditBatchTask(projectId, taskId, context) {
@@ -1969,7 +2122,7 @@ function listGeneratingTasks(projectId) {
   return db.prepare(`
     SELECT id, status, operation_type, created_at, started_at
     FROM generation_tasks
-    WHERE project_id = ? AND status = 'generating'
+    WHERE project_id = ? AND status IN ('generating', 'queued')
     ORDER BY COALESCE(started_at, created_at) DESC
   `).all(projectId).map((task) => ({
     id: task.id,
@@ -2055,7 +2208,7 @@ async function duplicateProject(sourceId, nameSuffix = ' 副本') {
       VALUES (?, ?, ?, ?, ?, ?)`).run(imageId, row.vision_model_id, row.vision_model_fingerprint, row.model_name, row.segments_json, row.created_at);
     }
     for (const row of rows.versions) {
-      const interrupted = row.task_id && taskStates.get(row.task_id)?.status === 'failed' && rows.tasks.find((task) => task.id === row.task_id)?.status === 'generating';
+      const interrupted = row.task_id && taskStates.get(row.task_id)?.status === 'failed' && ['generating', 'queued'].includes(rows.tasks.find((task) => task.id === row.task_id)?.status);
       const hasOutput = rows.images.some((image) => image.version_id === row.id);
       const status = interrupted ? (hasOutput ? 'partial' : 'failed') : row.status;
       const deletedAt = interrupted && !hasOutput ? timestamp : row.deleted_at || null;
@@ -2182,7 +2335,7 @@ async function importProjectZip(buffer) {
       VALUES (?, ?, ?, ?, ?, ?)`).run(imageId, row.vision_model_id, row.vision_model_fingerprint, row.model_name, row.segments_json, row.created_at);
   }
   for (const row of meta.versions || []) {
-    const interrupted = row.task_id && taskStates.get(row.task_id)?.status === 'failed' && taskRows.find((task) => task.id === row.task_id)?.status === 'generating';
+    const interrupted = row.task_id && taskStates.get(row.task_id)?.status === 'failed' && ['generating', 'queued'].includes(taskRows.find((task) => task.id === row.task_id)?.status);
     const hasOutput = imageRows.some((image) => image.version_id === row.id);
     const status = interrupted ? (hasOutput ? 'partial' : 'failed') : row.status;
     const deletedAt = interrupted && !hasOutput ? timestamp : row.deleted_at || null;
@@ -2476,14 +2629,16 @@ const server = http.createServer(async (req, res) => {
     // Auth endpoints (no session required)
     if (pathname === '/api/auth/login' && req.method === 'POST') {
       const input = await body(req);
-      if (input.username === AUTH_USERNAME && input.password === AUTH_PASSWORD) {
-        const token = createSession();
-        return json(res, 200, { token });
-      }
-      return json(res, 401, { error: '用户名或密码错误' });
+      const user = verifyLogin(input.username, input.password);
+      if (!user) return json(res, 401, { error: '用户名或密码错误' });
+      const token = createSession(user);
+      return json(res, 200, { token, username: user.username, role: user.role });
     }
     if (pathname === '/api/auth/check' && req.method === 'GET') {
-      return json(res, 200, { authenticated: isValidSession(getBearerToken(req)) });
+      const session = getSession(getBearerToken(req));
+      return json(res, 200, session
+        ? { authenticated: true, username: session.username, role: session.role }
+        : { authenticated: false, username: '', role: '' });
     }
     if (pathname === '/api/auth/logout' && req.method === 'POST') {
       const token = getBearerToken(req);
@@ -2493,6 +2648,28 @@ const server = http.createServer(async (req, res) => {
 
     // Require auth for all other /api/ routes (except health)
     if (pathname.startsWith('/api/') && pathname !== '/api/health') requireAuth(req);
+
+    // Management endpoints — admins only. Model configuration (including key
+    // pools) and backups carry API keys, so they live behind the same guard.
+    const adminSession = pathname.startsWith('/api/admin/') || pathname === '/api/backup' || pathname === '/api/backup/restore' ? requireAdmin(req) : null;
+    if (pathname === '/api/admin/settings' && req.method === 'GET') return json(res, 200, readSettings());
+    if (pathname === '/api/admin/settings' && req.method === 'PUT') return json(res, 200, await writeSettings(await body(req)));
+    if (pathname === '/api/admin/users' && req.method === 'GET') return json(res, 200, { users: listUsersPublic() });
+    if (pathname === '/api/admin/users' && req.method === 'POST') return json(res, 201, { user: createUser(await body(req)) });
+    const adminUserMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)$/);
+    if (adminUserMatch && req.method === 'PATCH') {
+      const username = decodeURIComponent(adminUserMatch[1]);
+      const user = updateUser(username, await body(req));
+      if (username !== adminSession.username) revokeUserSessions(username);
+      return json(res, 200, { user });
+    }
+    if (adminUserMatch && req.method === 'DELETE') {
+      const username = decodeURIComponent(adminUserMatch[1]);
+      if (username === adminSession.username) throw Object.assign(new Error('不能删除当前登录的账号'), { status: 400 });
+      const user = deleteUser(username);
+      revokeUserSessions(username);
+      return json(res, 200, { ok: true, user });
+    }
 
     if (requestToken) activeServiceRequests.add(requestToken);
     if (pathname.startsWith('/files/') && req.method === 'GET') return await serveFile(req, res, pathname, url.searchParams);
@@ -2530,6 +2707,7 @@ const server = http.createServer(async (req, res) => {
       try {
         await waitForActiveServiceRequests();
         await stopRunningTasksForRestore();
+        drainQueueForRestore();
         ({ safetyBackup } = await restoreBackup(Buffer.from(encoded, 'base64')));
       } catch (error) {
         if (!error.restartRequired) restoreInProgress = false;
@@ -2629,6 +2807,10 @@ const server = http.createServer(async (req, res) => {
     if (cancelMatch && req.method === 'POST') {
       const task = db.prepare('SELECT * FROM generation_tasks WHERE id = ? AND project_id = ?').get(cancelMatch[2], cancelMatch[1]);
       if (!task) throw Object.assign(new Error('任务不存在'), { status: 404 });
+      if (task.status === 'queued') {
+        cancelQueuedTask(task);
+        return json(res, 200, { ok: true, status: 'canceled' });
+      }
       if (task.status !== 'generating') return json(res, 200, { ok: false, status: task.status });
       canceledTasks.add(task.id);
       runningTasks.get(task.id)?.abort(new Error('canceled'));
@@ -2660,6 +2842,9 @@ const server = http.createServer(async (req, res) => {
     const galleryIdMatch = pathname.match(/^\/api\/gallery\/([^/]+)$/);
     if (galleryIdMatch && req.method === 'PATCH') return json(res, 200, { entry: galleryDto(await upsertGalleryEntry(await body(req, 32 * 1024 * 1024), galleryIdMatch[1])) });
     if (galleryIdMatch && req.method === 'DELETE') return json(res, 200, deleteGalleryEntry(galleryIdMatch[1]));
+    // Reading the model list is part of the workbench; every write (including
+    // connection tests, which accept raw keys) is admin-only.
+    if (pathname.startsWith('/api/models') && req.method !== 'GET') requireAdmin(req);
     if (pathname === '/api/models' && req.method === 'POST') return json(res, 201, { model: upsertModel(await body(req)) });
     if (pathname === '/api/models/test-config' && req.method === 'POST') {
       const candidate = await body(req);

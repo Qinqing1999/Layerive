@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { api, setAuthToken } from './api';
 
-export function LoginView({ onSuccess, notify }: { onSuccess: () => void; notify: (message: string, kind?: 'success' | 'error') => void }) {
+export function LoginView({ onSuccess, notify }: { onSuccess: (role: 'admin' | 'user') => void; notify: (message: string, kind?: 'success' | 'error') => void }) {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -13,7 +13,7 @@ export function LoginView({ onSuccess, notify }: { onSuccess: () => void; notify
     try {
       const result = await api.login(username, password);
       setAuthToken(result.token);
-      onSuccess();
+      onSuccess(result.role === 'admin' ? 'admin' : 'user');
     } catch (error) {
       notify((error as Error).message, 'error');
     } finally {

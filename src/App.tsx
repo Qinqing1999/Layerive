@@ -10,6 +10,7 @@ type View = { name: 'home' } | { name: 'models'; backTo?: string } | { name: 'wo
 
 export default function App() {
   const [authed, setAuthed] = useState<boolean | null>(null);
+  const [role, setRole] = useState<'admin' | 'user'>('user');
   const [view, setView] = useState<View>({ name: 'home' });
   const [projects, setProjects] = useState<Project[]>([]);
   const [models, setModels] = useState<ModelConfig[]>([]);
@@ -45,6 +46,7 @@ export default function App() {
     api.checkAuth().then((r) => {
       if (r.authenticated) {
         setAuthed(true);
+        setRole(r.role === 'admin' ? 'admin' : 'user');
         return Promise.all([refreshProjects(), refreshModels()])
           .catch(() => notify('无法连接本地服务，请确认应用服务已经启动。', 'error'))
           .finally(() => setLoading(false));
@@ -119,13 +121,14 @@ export default function App() {
   }
 
   if (authed === null) return null;
-  if (!authed) return <LoginView onSuccess={() => { setAuthed(true); setLoading(true); Promise.all([refreshProjects(), refreshModels()]).catch(() => notify('无法连接本地服务，请确认应用服务已经启动。', 'error')).finally(() => setLoading(false)); }} notify={notify} />;
+  if (!authed) return <LoginView onSuccess={(userRole) => { setRole(userRole); setAuthed(true); setLoading(true); Promise.all([refreshProjects(), refreshModels()]).catch(() => notify('无法连接本地服务，请确认应用服务已经启动。', 'error')).finally(() => setLoading(false)); }} notify={notify} />;
+  const isAdmin = role === 'admin';
 
   return (
     <>
-      {view.name === 'home' && <HomeView projects={projects} loading={loading} onOpen={(projectId) => setView({ name: 'workspace', projectId })} onCreate={createProject} onDelete={deleteProject} onDuplicate={duplicateProject} onImport={importProject} onRefreshProjects={refreshProjects} onModels={() => setView({ name: 'models' })} onLogout={logout} notify={notify} />}
-      {view.name === 'models' && <ModelConfigView models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} onBack={() => view.backTo ? setView({ name: 'workspace', projectId: view.backTo }) : setView({ name: 'home' })} onSave={saveModel} onDelete={deleteModel} onActivate={activateModel} onActivateVision={activateVisionModel} onTestConfig={testModelConfig} onRevealApiKey={revealModelApiKey} />}
-      {view.name === 'workspace' && <WorkspaceView projectId={view.projectId} models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} onBack={() => { setView({ name: 'home' }); void refreshProjects(); }} onModels={() => setView({ name: 'models', backTo: view.projectId })} onProjectChanged={handleProjectChanged} notify={notify} />}
+      {view.name === 'home' && <HomeView projects={projects} loading={loading} isAdmin={isAdmin} onOpen={(projectId) => setView({ name: 'workspace', projectId })} onCreate={createProject} onDelete={deleteProject} onDuplicate={duplicateProject} onImport={importProject} onRefreshProjects={refreshProjects} onModels={() => setView({ name: 'models' })} onLogout={logout} notify={notify} />}
+      {view.name === 'models' && <ModelConfigView models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} onBack={() => view.backTo ? setView({ name: 'workspace', projectId: view.backTo }) : setView({ name: 'home' })} onSave={saveModel} onDelete={deleteModel} onActivate={activateModel} onActivateVision={activateVisionModel} onTestConfig={testModelConfig} onRevealApiKey={revealModelApiKey} notify={notify} />}
+      {view.name === 'workspace' && <WorkspaceView projectId={view.projectId} models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} isAdmin={isAdmin} onBack={() => { setView({ name: 'home' }); void refreshProjects(); }} onModels={() => setView({ name: 'models', backTo: view.projectId })} onProjectChanged={handleProjectChanged} notify={notify} />}
       {toast && <div className={`toast ${toast.kind}`} role="status"><span>{toast.kind === 'success' ? '✓' : '!'}</span>{toast.message}</div>}
     </>
   );

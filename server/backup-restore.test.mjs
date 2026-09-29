@@ -8,6 +8,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { createZip, MAX_ZIP_ENTRIES, readZip } from './zip.mjs';
 import { makeDemoPng } from './png.mjs';
+import { authHeaders, login } from './test-auth.mjs';
 
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -34,8 +35,10 @@ test('backup restore rejects unsafe archives before replacement and preserves a 
   for (let i = 0; i < 100 && !/127\.0\.0\.1:\d+/.test(logs); i += 1) await pause(30);
   const base = logs.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
   assert.ok(base, logs);
+  const token = await login(base);
+  const auth = authHeaders(token);
   const post = async (endpoint, input, expected) => {
-    const response = await fetch(`${base}/api${endpoint}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
+    const response = await fetch(`${base}/api${endpoint}`, { method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(input) });
     const payload = await response.json();
     assert.equal(response.status, expected, JSON.stringify(payload));
     return payload;
@@ -43,7 +46,7 @@ test('backup restore rejects unsafe archives before replacement and preserves a 
 
   const project = await post('/projects', { name: '恢复校验项目' }, 201);
   await post('/gallery', { title: '恢复校验条目', prompt: '一只猫' }, 201);
-  const backupResponse = await fetch(`${base}/api/backup`);
+  const backupResponse = await fetch(`${base}/api/backup`, { headers: auth });
   assert.equal(backupResponse.status, 200);
   const backup = Buffer.from(await backupResponse.arrayBuffer());
   const entries = readZip(backup);
@@ -62,7 +65,7 @@ test('backup restore rejects unsafe archives before replacement and preserves a 
   ]);
   await post('/backup/restore', { data: traversal.toString('base64') }, 400);
   assert.equal(existsSync(path.join(dataRoot, 'outside.txt')), false);
-  assert.equal((await (await fetch(`${base}/api/projects`)).json()).projects.length, 1, 'failed validation must leave live data intact');
+  assert.equal((await (await fetch(`${base}/api/projects`, { headers: auth })).json()).projects.length, 1, 'failed validation must leave live data intact');
 
   const malformedPath = path.join(fixture, 'incompatible-schema.db');
   const malformed = new DatabaseSync(malformedPath);
@@ -71,7 +74,7 @@ test('backup restore rejects unsafe archives before replacement and preserves a 
   } finally { malformed.close(); }
   const malformedArchive = createZip([{ name: 'data/app.db', data: await readFile(malformedPath) }]);
   await post('/backup/restore', { data: malformedArchive.toString('base64') }, 400);
-  assert.equal((await (await fetch(`${base}/api/projects`)).json()).projects.length, 1, 'schema validation must also leave live data intact');
+  assert.equal((await (await fetch(`${base}/api/projects`, { headers: auth })).json()).projects.length, 1, 'schema validation must also leave live data intact');
 
   const restored = await post('/backup/restore', { data: backup.toString('base64') }, 200);
   assert.equal(restored.restartRequired, true);
@@ -103,8 +106,9 @@ test('backup restore rejects unsafe archives before replacement and preserves a 
   for (let i = 0; i < 100 && !/127\.0\.0\.1:\d+/.test(restartedLogs); i += 1) await pause(30);
   const restartedBase = restartedLogs.match(/http:\/\/127\.0\.0\.1:\d+/)?.[0];
   assert.ok(restartedBase, restartedLogs);
+  // Sessions persist in the data root, so the token survives the restore restart.
   const upload = await fetch(`${restartedBase}/api/projects/${project.project.id}/images`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: makeDemoPng('restored upload', 12, 8).toString('base64'), mimeType: 'image/png' }),
   });
   assert.equal(existsSync(path.join(dataRoot, 'projects', project.project.id, 'uploads')), true);

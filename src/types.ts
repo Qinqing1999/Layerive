@@ -6,6 +6,8 @@ export type ModelConfig = {
   apiFormat?: 'anthropic_messages' | 'chat_completions' | 'responses';
   baseUrl: string;
   apiKey: string;
+  /** 多 Key 轮询池；掩码返回时逐位为 '••••••••'。 */
+  apiKeys: string[];
   model: string;
   capabilities: string[];
   defaultParams: { size?: string; count?: number; quality?: string };
@@ -99,7 +101,7 @@ export type TextSegment = {
 
 export type GenerationTask = {
   id: string;
-  status: 'generating' | 'success' | 'partial' | 'failed' | 'canceled';
+  status: 'queued' | 'generating' | 'success' | 'partial' | 'failed' | 'canceled';
   operationType?: string;
   stage?: 'planning' | 'compositing' | 'generating' | 'preserving' | null;
   error: string | null;
@@ -122,7 +124,7 @@ export type BatchEditItem = {
 
 export type BatchEditProgress = {
   id: string;
-  status: 'generating' | 'success' | 'partial' | 'failed' | 'canceled';
+  status: 'queued' | 'generating' | 'success' | 'partial' | 'failed' | 'canceled';
   versionId: string | null;
   versionNumber: number | null;
   localEdit?: boolean;
@@ -144,6 +146,11 @@ export type BatchEditProgress = {
 };
 
 export type BatchEditResult = GenerateResult & { versionId: string };
+
+/** 管理后台：本地账号（users.json，密码哈希不回传）。 */
+export type AdminUser = { username: string; role: 'admin' | 'user' };
+/** 管理后台：运行设置（settings.json）。 */
+export type AdminSettings = { queueConcurrency: number };
 
 export type GalleryEntryItem = {
   id: string;

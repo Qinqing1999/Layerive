@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api, readFileAsDataUrl, thumbUrl } from './api';
 import { Icon } from './Icon';
 import { PromptGalleryModal } from './PromptGalleryModal';
-import { sizesForProvider, defaultSizeForProvider, closestSizeForDimensions, isValidSizeForProvider, OUTPUT_FORMATS, type OutputFormat } from './sizes';
+import { sizesForProvider, defaultSizeForProvider, closestSizeForDimensions, mainstreamSizeOptions, isValidSizeForProvider, OUTPUT_FORMATS, type OutputFormat } from './sizes';
 import { useTheme } from './theme';
 import type { GalleryEntry } from './gallery';
 import type { BatchEditProgress, GenerationTask, LocalEditReference, ModelConfig, ProjectBundle, ProjectImage, TextSegment, Version } from './types';
@@ -12,6 +12,7 @@ type Props = {
   models: ModelConfig[];
   activeModel: string;
   activeVisionModel: string;
+  isAdmin: boolean;
   onBack: () => void;
   onModels: () => void;
   onProjectChanged: () => void;
@@ -302,18 +303,19 @@ function VersionTreeModal({ versions, currentVersionId, onSelect, onClose }: { v
   );
 }
 
-export function WorkspaceView({ projectId, models, activeModel, activeVisionModel, onBack, onModels, onProjectChanged, notify }: Props) {
+export function WorkspaceView({ projectId, models, activeModel, activeVisionModel, isAdmin, onBack, onModels, onProjectChanged, notify }: Props) {
   const { theme, toggleTheme } = useTheme();
   const imageModels = models.filter((model) => model.type !== 'vision');
   const visionModels = models.filter((model) => model.type === 'vision');
-  const fallbackVisionModelId = visionModels.find((model) => model.id === activeVisionModel)?.id || visionModels[0]?.id || '';
   const [bundle, setBundle] = useState<ProjectBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [prompt, setPrompt] = useState('');
   const [stylePrompt, setStylePrompt] = useState('');
   const [operation, setOperation] = useState('auto');
-  const [modelId, setModelId] = useState(activeModel);
-  const [visionModelId, setVisionModelId] = useState(fallbackVisionModelId);
+  // The server always runs the admin-managed default model; the workbench no
+  // longer keeps local model choices, it only mirrors the active defaults.
+  const modelId = activeModel;
+  const visionModelId = activeVisionModel;
   const [size, setSize] = useState(defaultSizeForProvider(imageModels.find((model) => model.id === activeModel)?.provider));
   const [outputFormat, setOutputFormat] = useState<OutputFormat>('png');
   const [transparentBg, setTransparentBg] = useState(false);
@@ -396,7 +398,6 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   const draftCacheKey = `layerive-draft:${projectId}`;
 
   const generating = activeTask !== null;
-  const visionBusy = generating || recognizingText || textEditSubmitting || localEditSubmitting || extractSubmitting || removingWatermark || savingToGallery;
   const imageMap = useMemo(() => new Map((bundle?.images || []).map((image) => [image.id, image])), [bundle?.images]);
   const currentImage = currentImageId ? imageMap.get(currentImageId) || null : null;
   const inputImage = inputImageId ? imageMap.get(inputImageId) || null : null;
@@ -591,10 +592,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
       setStylePrompt(String(draft.stylePrompt || ''));
       setBatchStylePrompt(String(draft.stylePrompt || ''));
       setOperation(String(draft.operation || 'auto'));
-      setModelId(String(draft.modelId || data.project.defaultModelId || activeModel));
-      const savedVisionModelId = String(draft.visionModelId || '');
-      setVisionModelId(visionModels.some((model) => model.id === savedVisionModelId) ? savedVisionModelId : fallbackVisionModelId);
-      setSize(String(draft.size || defaultSizeForProvider(imageModels.find((model) => model.id === String(draft.modelId || data.project.defaultModelId || activeModel))?.provider)));
+      setSize(String(draft.size || defaultSizeForProvider(imageModels.find((model) => model.id === activeModel)?.provider)));
       setOutputFormat((draft.outputFormat as OutputFormat) || 'png');
       setTransparentBg(Boolean(draft.transparentBg));
       setCount(Number(draft.count || 1));
@@ -609,16 +607,12 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   }, [projectId, activeModel, activeVisionModel, startPolling, notify, draftCacheKey]);
 
   useEffect(() => {
-    setVisionModelId((current) => visionModels.some((model) => model.id === current) ? current : fallbackVisionModelId);
-  }, [models, activeVisionModel]);
-
-  useEffect(() => {
     if (!initialized.current || !bundle) return;
     try { localStorage.setItem(draftCacheKey, JSON.stringify(draftSnapshot.current)); } catch { /* local storage may be unavailable */ }
     setSaveState('saving');
     const timer = window.setTimeout(() => { void flushDraft(); }, 900);
     return () => window.clearTimeout(timer);
-  }, [prompt, stylePrompt, operation, modelId, visionModelId, size, outputFormat, transparentBg, count, inputImageId, currentImageId, flushDraft, draftCacheKey]);
+  }, [prompt, stylePrompt, operation, size, outputFormat, transparentBg, count, inputImageId, currentImageId, flushDraft, draftCacheKey]);
 
   useEffect(() => {
     const persistDraft = () => {
@@ -671,7 +665,9 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   function useImage(image: ProjectImage) {
     setCurrentImageId(image.id);
     setInputImageId(image.id);
-    if (image.sourceType === 'upload') setSize(closestSizeForDimensions(provider, image.width, image.height));
+    // 输入图是什么比例，下一次生成的画布就优先跟随什么比例；模型只支持固定
+    // 尺寸时取比例最接近的一档。上传图与生成图都按此处理。
+    if (image.width && image.height) setSize(closestSizeForDimensions(provider, image.width, image.height));
     if (operation === 'text_to_image') setOperation('auto');
   }
 
@@ -957,10 +953,8 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
     setRightMode('chat');
     closeLocalEdit();
     closeExtract();
-    const availableSizes = sizesForProvider(provider);
-    const sourceRatio = (currentImage.width || 1) / (currentImage.height || 1);
-    const preferred = availableSizes.find((option) => Math.abs(Number(option.value.split('x')[0]) / Number(option.value.split('x')[1]) - sourceRatio) > 0.08) || availableSizes[0];
-    setOutpaintSize(preferred?.value || defaultSizeForProvider(provider));
+    // 原图是什么比例就优先扩成什么比例（向四周自然补全）；面板里也可改选主流比例。
+    setOutpaintSize(closestSizeForDimensions(provider, currentImage.width, currentImage.height));
     setOutpaintMode(true);
   }
 
@@ -1370,6 +1364,8 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
 
   const beforeImage = compareMode === 'slider' ? (compareImage || parentImage) : null;
   const outpaintAspectRatio = outpaintSize ? outpaintSize.replace('x', ' / ') : undefined;
+  const originalOutpaintSize = currentImage?.width && currentImage?.height ? closestSizeForDimensions(provider, currentImage.width, currentImage.height) : null;
+  const mainstreamOutpaintOptions = mainstreamSizeOptions(provider);
 
   return (
     <main className="workspace-shell">
@@ -1384,14 +1380,11 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
         </div>
         <div className={`autosave-state ${saveState}`}><span />{saveState === 'saving' ? '保存中…' : saveState === 'failed' ? '保存失败' : '已自动保存'}</div>
         <div className="workspace-header-actions">
-          <select value={modelId} onChange={(event) => setModelId(event.target.value)} aria-label="图片生成模型" title="当前图片生成模型">{imageModels.map((model) => <option key={model.id} value={model.id}>出图 · {model.name}</option>)}</select>
-          <select className="vision-model-select" value={visionModelId} onChange={(event) => setVisionModelId(event.target.value)} aria-label="视觉识别模型" title="当前视觉识别模型" disabled={!visionModels.length || visionBusy}>
-            {!visionModels.length && <option value="">未配置视觉模型</option>}
-            {visionModels.map((model) => <option key={model.id} value={model.id}>视觉 · {model.name}</option>)}
-          </select>
+          <span className="model-chip" title="图片生成由管理员配置的默认模型执行">{selectedModel ? `出图 · ${selectedModel.name}` : '未配置图片模型'}</span>
+          <span className="model-chip vision" title="视觉理解由管理员配置的默认视觉模型执行">{selectedVisionModel ? `视觉 · ${selectedVisionModel.name}` : '未配置视觉模型'}</span>
           <button className="gallery-open-button" title="提示词画廊：把完整提示词填入对话或批量列表，或把风格设为项目 / 批量统一风格" aria-label="提示词画廊" onClick={() => setGalleryOpen(true)}><span className="gallery-open-icon"><Icon name="gallery" size={17} /><Icon name="sparkle" size={9} /></span><span className="gallery-open-copy"><strong>提示词画廊</strong><small>灵感 · 风格 · 模板</small></span></button>
           <button className="icon-button theme-toggle" onClick={toggleTheme} title={theme === 'dark' ? '切换到亮色模式' : '切换到暗色模式'} aria-label="切换配色模式"><Icon name={theme === 'dark' ? 'sun' : 'moon'} size={16} /></button>
-          <button className="icon-button" title="模型配置" onClick={() => void leaveWorkspace(onModels)}><Icon name="sliders" size={17} /></button>
+          {isAdmin && <button className="icon-button" title="管理后台" onClick={() => void leaveWorkspace(onModels)}><Icon name="sliders" size={17} /></button>}
         </div>
       </header>
 
@@ -1447,7 +1440,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
                 <div className="local-edit-panel-actions"><button className="button secondary" disabled={localBatchSubmitting} onClick={() => setLocalBatchOpen(false)}>收起</button><button className="button primary" disabled={Boolean(localBatchError) || localBatchSubmitting || generating || localReferenceLoading} onClick={() => void submitLocalBatch()}>{localBatchSubmitting ? '正在创建批次…' : `开始批量修改 ${localBatchLines.length} 张`}</button></div>
               </aside>}
             </div>}
-            {outpaintMode && currentImage && <section className="outpaint-panel" onPointerDown={(event) => event.stopPropagation()}><div className="outpaint-panel-head"><div><strong>扩图</strong><span>选择当前模型支持的目标画布比例</span></div><button className="outpaint-exit" onClick={closeOutpaint}><Icon name="close" size={13} /> 退出</button></div><div className="outpaint-size-list">{sizesForProvider(provider).map((option) => <button key={option.value} className={option.value === outpaintSize ? 'active' : ''} onClick={() => setOutpaintSize(option.value)}><strong>{option.ratio}</strong><span>{option.value}</span></button>)}</div><p className="outpaint-summary">原图将居中保留，绿色虚线框内的新增区域会由模型自然延展补全。</p><div className="outpaint-panel-actions"><button className="button secondary" onClick={closeOutpaint}>取消</button><button className="button primary" disabled={!outpaintSize || outpaintSubmitting || generating} onClick={() => void submitOutpaint()}>{outpaintSubmitting ? '正在创建扩图任务…' : '确认扩图'}</button></div></section>}
+            {outpaintMode && currentImage && <section className="outpaint-panel" onPointerDown={(event) => event.stopPropagation()}><div className="outpaint-panel-head"><div><strong>扩图</strong><span>已优先匹配原图比例，也可选择主流画布比例</span></div><button className="outpaint-exit" onClick={closeOutpaint}><Icon name="close" size={13} /> 退出</button></div><p className="outpaint-group-label">主流比例</p><div className="outpaint-size-list">{originalOutpaintSize && <button key="original" className={originalOutpaintSize === outpaintSize ? 'active' : ''} title="保持原图比例，向四周自然补全画面" onClick={() => setOutpaintSize(originalOutpaintSize)}><strong>原比例</strong><span>{originalOutpaintSize}</span></button>}{mainstreamOutpaintOptions.map((option) => <button key={option.ratio} className={option.value === outpaintSize ? 'active' : ''} onClick={() => setOutpaintSize(option.value)}><strong>{option.ratio}</strong><span>{option.value}</span></button>)}</div><p className="outpaint-group-label">全部尺寸</p><div className="outpaint-size-list">{sizesForProvider(provider).map((option) => <button key={option.value} className={option.value === outpaintSize ? 'active' : ''} onClick={() => setOutpaintSize(option.value)}><strong>{option.ratio}</strong><span>{option.value}</span></button>)}</div><p className="outpaint-summary">原图将居中保留，绿色虚线框内的新增区域会由模型自然延展补全。</p><div className="outpaint-panel-actions"><button className="button secondary" onClick={closeOutpaint}>取消</button><button className="button primary" disabled={!outpaintSize || outpaintSubmitting || generating} onClick={() => void submitOutpaint()}>{outpaintSubmitting ? '正在创建扩图任务…' : '确认扩图'}</button></div></section>}
             {(extractMode || extractRect) && !extractDragging && currentImage && <section className="extract-panel" onPointerDown={(event) => event.stopPropagation()}><div className="extract-panel-head"><div><strong>提取素材</strong><span>{extractRect ? '识别模型会聚焦框选主体，并剔除圈入的边缘干扰' : '可从图片内外起拖，框选想提取的内容'}</span></div><button className="extract-exit" onClick={closeExtract}><Icon name="close" size={13} /> 退出</button></div>{extractRect && <><div className="extract-preview">{extractPreview ? <img src={extractPreview.dataUrl} alt="提取区域截图预览" /> : <span className="extract-preview-loading"><span className="spinner" />正在生成截图…</span>}{extractPreview && <small>{extractPreview.padded ? '已自动补边 · ' : ''}{extractPreview.width} × {extractPreview.height}</small>}</div><textarea value={extractHint} onChange={(event) => setExtractHint(event.target.value)} placeholder="可选补充说明，例如：只要中间的银幕，去掉两侧的座椅" rows={2} /><div className="extract-panel-actions"><button className="button secondary" onClick={() => { setExtractRect(null); setExtractPreview(null); }}>重新框选</button><button className="button primary" disabled={!extractPreview || extractSubmitting || generating} onClick={() => void submitExtract()}>{extractSubmitting ? '正在识别与规划…' : '提取为独立素材'}</button></div></>}</section>}
           </div>
           {batchProgress && <section className={`batch-progress-panel ${batchProgress.status}`} aria-live="polite">
