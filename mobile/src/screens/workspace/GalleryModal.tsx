@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
+import { ActivityIndicator, FlatList, Image, Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, imageSource } from '../../api';
 import { useTheme } from '../../theme';
 import { fontSize, radius, spacing } from '../../theme';
@@ -22,6 +22,8 @@ const CATEGORY_LABELS: Record<string, string> = {
   other: '其他',
 };
 
+const CATEGORIES = ['mine', 'portrait', 'scene', 'product', 'style', 'other'];
+
 /** Prompt gallery: tap an entry to fill the prompt box; save the canvas image as a new entry. */
 export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props) {
   const { colors } = useTheme();
@@ -29,6 +31,12 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
   const [entries, setEntries] = useState<GalleryEntryItem[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [editTarget, setEditTarget] = useState<GalleryEntryItem | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editPrompt, setEditPrompt] = useState('');
+  const [editStyle, setEditStyle] = useState('');
+  const [editCategory, setEditCategory] = useState('mine');
+  const [editBusy, setEditBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -56,6 +64,44 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
     }
   }
 
+  function openEdit(entry: GalleryEntryItem) {
+    setEditTarget(entry);
+    setEditTitle(entry.title);
+    setEditPrompt(entry.prompt || '');
+    setEditStyle(entry.stylePrompt || '');
+    setEditCategory(entry.category || 'mine');
+  }
+
+  async function submitEdit() {
+    if (!editTarget || editBusy) return;
+    setEditBusy(true);
+    try {
+      await api.galleryUpdate(editTarget.id, {
+        title: editTitle.trim(),
+        prompt: editPrompt.trim(),
+        stylePrompt: editStyle.trim(),
+        category: editCategory,
+      });
+      setEditTarget(null);
+      await load();
+      notify('已更新画廊条目');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
+  async function deleteEntry(entry: GalleryEntryItem) {
+    try {
+      await api.galleryDelete(entry.id);
+      await load();
+      notify('已删除');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    }
+  }
+
   return (
     <View style={styles.container}>
       <Pressable style={[styles.saveBtn, (!currentImageId || saving) && { opacity: 0.5 }]} onPress={saveCurrentImage} disabled={!currentImageId || saving}>
@@ -72,21 +118,64 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} tintColor={colors.accent} />}
           ListEmptyComponent={<Text style={styles.empty}>画廊暂无条目</Text>}
           renderItem={({ item }: { item: GalleryEntryItem }) => (
-            <Pressable style={styles.card} onPress={() => onUse(item.prompt, item.stylePrompt)}>
-              {item.image ? <Image source={imageSource(item.image, 240)} style={styles.thumb} resizeMode="cover" /> : null}
-              <View style={styles.body}>
-                <View style={styles.cardHead}>
-                  <Text style={styles.title} numberOfLines={1}>{item.title}</Text>
-                  <Text style={styles.category}>{CATEGORY_LABELS[item.category] || item.category}</Text>
+            <View style={styles.card}>
+              <Pressable style={styles.cardMain} onPress={() => onUse(item.prompt, item.stylePrompt)}>
+                {item.image ? <Image source={imageSource(item.image, 240)} style={styles.thumb} resizeMode="cover" /> : null}
+                <View style={styles.body}>
+                  <View style={styles.cardHead}>
+                    <Text style={styles.title} numberOfLines={1}>{item.title}</Text>
+                    <Text style={styles.category}>{CATEGORY_LABELS[item.category] || item.category}</Text>
+                  </View>
+                  {item.prompt ? <Text style={styles.prompt} numberOfLines={3}>{item.prompt}</Text> : null}
+                  {item.stylePrompt ? <Text style={styles.style} numberOfLines={1}>风格：{item.stylePrompt}</Text> : null}
                 </View>
-                {item.prompt ? <Text style={styles.prompt} numberOfLines={3}>{item.prompt}</Text> : null}
-                {item.stylePrompt ? <Text style={styles.style} numberOfLines={1}>风格：{item.stylePrompt}</Text> : null}
+                <Icon name="send" size={14} color={colors.muted} />
+              </Pressable>
+              <View style={styles.cardActions}>
+                <Pressable style={styles.cardActionBtn} onPress={() => openEdit(item)}>
+                  <Icon name="edit" size={14} color={colors.muted} />
+                  <Text style={styles.cardActionText}>编辑</Text>
+                </Pressable>
+                <Pressable style={styles.cardActionBtn} onPress={() => deleteEntry(item)}>
+                  <Icon name="trash" size={14} color={colors.muted} />
+                  <Text style={styles.cardActionText}>删除</Text>
+                </Pressable>
               </View>
-              <Icon name="send" size={14} color={colors.muted} />
-            </Pressable>
+            </View>
           )}
         />
       )}
+
+      {/* Edit Modal */}
+      <Modal visible={Boolean(editTarget)} animationType="fade" transparent>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>编辑画廊条目</Text>
+            <Text style={styles.fieldLabel}>标题</Text>
+            <TextInput style={styles.modalInput} value={editTitle} onChangeText={setEditTitle} placeholder="标题" placeholderTextColor={colors.muted} />
+            <Text style={styles.fieldLabel}>提示词</Text>
+            <TextInput style={[styles.modalInput, styles.modalTextarea]} value={editPrompt} onChangeText={setEditPrompt} placeholder="提示词" placeholderTextColor={colors.muted} multiline numberOfLines={3} />
+            <Text style={styles.fieldLabel}>风格提示词</Text>
+            <TextInput style={styles.modalInput} value={editStyle} onChangeText={setEditStyle} placeholder="风格提示词（可选）" placeholderTextColor={colors.muted} />
+            <Text style={styles.fieldLabel}>分类</Text>
+            <View style={styles.categoryRow}>
+              {CATEGORIES.map((cat) => (
+                <Pressable key={cat} style={[styles.categoryChip, editCategory === cat && styles.categoryChipActive]} onPress={() => setEditCategory(cat)}>
+                  <Text style={[styles.categoryChipText, editCategory === cat && styles.categoryChipTextActive]}>{CATEGORY_LABELS[cat]}</Text>
+                </Pressable>
+              ))}
+            </View>
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancel} onPress={() => setEditTarget(null)}>
+                <Text style={styles.modalCancelText}>取消</Text>
+              </Pressable>
+              <Pressable style={[styles.modalSubmit, editBusy && { opacity: 0.5 }]} onPress={submitEdit} disabled={editBusy}>
+                {editBusy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.modalSubmitText}>保存</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -99,7 +188,11 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     loading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
     list: { padding: spacing.md, paddingTop: 0, paddingBottom: spacing.xxl, gap: spacing.sm },
     empty: { textAlign: 'center', color: c.muted, marginTop: spacing.xl },
-    card: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, padding: spacing.sm },
+    card: { backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, padding: spacing.sm },
+    cardMain: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+    cardActions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.sm, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: c.border },
+    cardActionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4 },
+    cardActionText: { fontSize: fontSize.xs, color: c.muted },
     thumb: { width: 56, height: 56, borderRadius: radius.sm, backgroundColor: c.bg },
     body: { flex: 1 },
     cardHead: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
@@ -107,4 +200,20 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     category: { fontSize: fontSize.xs, color: c.accent },
     prompt: { fontSize: fontSize.xs, color: c.textSecondary, marginTop: 2 },
     style: { fontSize: fontSize.xs, color: c.muted, marginTop: 2 },
+    modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center', padding: spacing.lg },
+    modalCard: { width: '100%', maxWidth: 420, backgroundColor: c.card, borderRadius: radius.lg, padding: spacing.lg, borderWidth: 1, borderColor: c.border },
+    modalTitle: { fontSize: fontSize.lg, fontWeight: '700', color: c.text, marginBottom: spacing.md },
+    fieldLabel: { fontSize: fontSize.xs, color: c.muted, fontWeight: '600', marginBottom: 4, marginTop: spacing.sm },
+    modalInput: { borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, fontSize: fontSize.md, color: c.text },
+    modalTextarea: { minHeight: 72, textAlignVertical: 'top' },
+    categoryRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
+    categoryChip: { paddingHorizontal: spacing.sm, paddingVertical: 4, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border },
+    categoryChipActive: { backgroundColor: c.accent, borderColor: c.accent },
+    categoryChipText: { fontSize: fontSize.xs, color: c.muted },
+    categoryChipTextActive: { color: '#fff', fontWeight: '600' },
+    modalActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg },
+    modalCancel: { flex: 1, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: radius.sm, borderWidth: 1, borderColor: c.border },
+    modalCancelText: { color: c.muted, fontSize: fontSize.md, fontWeight: '600' },
+    modalSubmit: { flex: 1, height: 44, alignItems: 'center', justifyContent: 'center', borderRadius: radius.sm, backgroundColor: c.accent },
+    modalSubmitText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
   });

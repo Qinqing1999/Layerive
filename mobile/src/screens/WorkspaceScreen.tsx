@@ -156,8 +156,9 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     try {
       const data = await api.getProject(projectId);
       setBundle(data);
-      const draft = data.project.draft as { prompt?: string };
+      const draft = data.project.draft as { prompt?: string; count?: number };
       if (draft?.prompt) setPrompt(draft.prompt);
+      if (typeof draft?.count === 'number') setCount(draft.count);
     } catch (e) {
       notify((e as Error).message, 'error');
     } finally {
@@ -171,11 +172,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   useEffect(() => {
     if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
     draftTimerRef.current = setTimeout(async () => {
-      if (!prompt.trim() || !bundle) return;
-      try { await api.updateProject(projectId, { draft: { prompt } }); } catch { /* ignore */ }
+      if (!bundle) return;
+      try {
+        await api.updateProject(projectId, { draft: { prompt: prompt.trim(), count } });
+      } catch { /* ignore */ }
     }, 900);
     return () => { if (draftTimerRef.current) clearTimeout(draftTimerRef.current); };
-  }, [prompt, projectId, bundle]);
+  }, [prompt, count, projectId, bundle]);
 
   // 进入工作台（或 App 重启后重进）恢复进行中/排队中的任务，让队列显示与轮询接上
   useEffect(() => {
@@ -256,6 +259,33 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         data: asset.base64,
         mimeType: asset.mimeType || 'image/jpeg',
         name: asset.fileName || `photo-${Date.now()}.jpg`,
+        use: 'upload',
+        rotation: exifRotation(asset),
+      });
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    }
+  }
+
+  /** 直接拍照（不进入选图库） */
+  async function pickCamera() {
+    if (uploading) return;
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) { notify('需要相机权限', 'error'); return; }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'],
+        quality: 0.9,
+        base64: true,
+        exif: true,
+      });
+      const asset = result.assets?.[0];
+      if (!asset?.base64) return;
+      setCropAsset({
+        uri: asset.uri,
+        data: asset.base64,
+        mimeType: asset.mimeType || 'image/jpeg',
+        name: asset.fileName || `camera-${Date.now()}.jpg`,
         use: 'upload',
         rotation: exifRotation(asset),
       });
@@ -782,6 +812,9 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         </Pressable>
         <Pressable onPress={pickImage} hitSlop={8} style={styles.topbarBtn} disabled={uploading}>
           {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={18} color={colors.text} />}
+        </Pressable>
+        <Pressable onPress={pickCamera} hitSlop={8} style={styles.topbarBtn} disabled={uploading}>
+          <Icon name="camera" size={18} color={colors.text} />
         </Pressable>
       </View>
 
