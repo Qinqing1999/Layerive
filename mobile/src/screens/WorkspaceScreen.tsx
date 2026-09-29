@@ -817,6 +817,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         <Pressable onPress={pickCamera} hitSlop={8} style={styles.topbarBtn} disabled={uploading}>
           <Icon name="camera" size={18} color={colors.text} />
         </Pressable>
+        <Pressable onPress={() => void sharePreview()} hitSlop={8} style={styles.topbarBtn} disabled={!currentImage}>
+          <Icon name="download" size={18} color={colors.text} />
+        </Pressable>
+        <Pressable onPress={() => setBottomTab('history')} hitSlop={8} style={styles.topbarBtn} disabled={!currentImage}>
+          <Icon name="history" size={18} color={colors.text} />
+        </Pressable>
       </View>
 
       {/* 历史版本独立页面 */}
@@ -847,15 +853,6 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
               ? { position: 'absolute', left: imageDisplay.left, top: imageDisplay.top, width: imageDisplay.w, height: imageDisplay.h }
               : styles.canvasImage}
             disabled={Boolean(selectMode)}
-            onPress={() => {
-              if (selectMode) return;
-              Alert.alert('画布图片', '当前图片', [
-                { text: '保存 / 分享', onPress: () => void sharePreview() },
-                { text: '设为当前图片（继续修改）', onPress: () => { useAsCurrent(currentImage); setBottomTab('chat'); } },
-                { text: '查看大图', onPress: () => setPreview({ image: currentImage }) },
-                { text: '取消', style: 'cancel' },
-              ]);
-            }}
           >
             <Image
               source={imageSource(currentImage.url, 1280)}
