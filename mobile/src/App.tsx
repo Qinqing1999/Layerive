@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { SafeAreaProvider, SafeAreaView } from 'react-native-safe-area-context';
 import { StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { getAuthToken, api, clearAuthToken, initServerBase } from './api';
+import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler } from './api';
 import { ThemeProvider, useTheme } from './theme';
 import { fontSize, radius, spacing } from './theme';
 import type { ModelConfig, Project } from './types';
@@ -28,9 +28,12 @@ function AppShell() {
   const [activeVisionModel, setActiveVisionModel] = useState('');
   const [loading, setLoading] = useState(true);
 
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => {
     setToast({ message, kind });
-    setTimeout(() => setToast(null), 3200);
+    // 连续 notify 时清掉上一个计时器，避免新 toast 被旧计时器提前清掉
+    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
+    toastTimerRef.current = setTimeout(() => setToast(null), 3200);
   }, []);
 
   const loadAll = useCallback(async () => {
@@ -61,6 +64,15 @@ function AppShell() {
       }
     })();
   }, [loadAll]);
+
+  // 会话过期（401）时自动回到登录页
+  useEffect(() => {
+    setSessionExpiredHandler(() => {
+      setView({ name: 'home' });
+      setAuthState('guest');
+    });
+    return () => setSessionExpiredHandler(null);
+  }, []);
 
   const onLoginSuccess = useCallback(async () => {
     setAuthState('authed');

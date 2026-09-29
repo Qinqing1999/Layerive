@@ -23,7 +23,7 @@ import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } fr
 import { outpaintPresets } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
-import type { GenerationTask, Message, ModelConfig, ProjectBundle, ProjectImage, Version } from '../types';
+import type { GenerateResult, GenerationTask, Message, ModelConfig, ProjectBundle, ProjectImage, Version } from '../types';
 import { Icon } from '../components/Icon';
 import { CropView } from '../components/CropView';
 import { ModalSheet } from '../components/ModalSheet';
@@ -101,6 +101,9 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
   const [busyLabel, setBusyLabel] = useState('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
+  /** 最近一次提交（按任务 ID 记录），任务失败时可原样重发 */
+  const lastSubmitRef = useRef<{ taskId: string; submit: () => Promise<GenerateResult> } | null>(null);
+  const [failedTask, setFailedTask] = useState<{ error: string | null; retryable: boolean } | null>(null);
 
   const currentImage = useMemo(
     () => bundle?.images.find((img) => img.id === bundle.project.currentImageId) || null,
@@ -179,6 +182,11 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
           setActiveTask(task);
         } else {
           setActiveTask(null);
+          setFailedTask(
+            task.status === 'failed'
+              ? { error: task.error, retryable: lastSubmitRef.current?.taskId === task.id }
+              : null,
+          );
           await loadBundle();
         }
       } catch { /* ignore */ }
@@ -278,21 +286,37 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
     notify(`已切换到 V${version.number}，可从此版本继续创作`);
   }
 
+  /** 提交任务并记录可重试闭包；轮询发现失败时可通过该闭包原样重发 */
+  async function runTracked(submit: () => Promise<GenerateResult>) {
+    setFailedTask(null);
+    const result = await submit();
+    lastSubmitRef.current = { taskId: result.taskId, submit };
+    const task = await api.getTask(projectId, result.taskId);
+    setActiveTask(task);
+  }
+
+  function retryFailed() {
+    const entry = lastSubmitRef.current;
+    if (!entry || !failedTask?.retryable) return;
+    setFailedTask(null);
+    setBottomTab('chat');
+    runTracked(entry.submit).catch((e) => notify((e as Error).message, 'error'));
+  }
+
   async function submitGenerate() {
     if (!prompt.trim() || generating) return;
+    // 提交前固化输入，失败重试时沿用当时的画布图与父版本
+    const input: Record<string, unknown> = {
+      prompt: prompt.trim(),
+      params: { count },
+    };
+    if (currentImage) input.imageId = currentImage.id;
+    if (parentVersionId) input.parentVersionId = parentVersionId;
     setGenerating(true);
     setBottomTab('chat');
     try {
-      const input: Record<string, unknown> = {
-        prompt: prompt.trim(),
-        params: { count },
-      };
-      if (currentImage) input.imageId = currentImage.id;
-      if (parentVersionId) input.parentVersionId = parentVersionId;
-      const result = await api.generate(projectId, input);
+      await runTracked(() => api.generate(projectId, input));
       setParentVersionId(null);
-      const task = await api.getTask(projectId, result.taskId);
-      setActiveTask(task);
     } catch (e) {
       notify((e as Error).message, 'error');
     } finally {
@@ -348,9 +372,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
         onPress: async () => {
           try {
             setBottomTab('chat');
-            const result = await ops[kind]();
-            const task = await api.getTask(projectId, result.taskId);
-            setActiveTask(task);
+            await runTracked(ops[kind]);
           } catch (e) { notify((e as Error).message, 'error'); }
         },
       },
@@ -359,30 +381,28 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
 
   async function submitOutpaint(size: string) {
     if (!currentImage) return;
+    const imageId = currentImage.id;
     setSheet(null);
     try {
       setBottomTab('chat');
-      const result = await api.outpaint(projectId, { imageId: currentImage.id, size });
-      const task = await api.getTask(projectId, result.taskId);
-      setActiveTask(task);
+      await runTracked(() => api.outpaint(projectId, { imageId, size }));
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
   async function submitLocalEdit() {
     if (!currentImage || !selectedRect) return;
     if (!localInstruction.trim() && !localReference) { notify('请描述修改要求或上传参考图', 'error'); return; }
+    // 固化本次输入（含参考图），失败后可原样重试
+    const input: Record<string, unknown> = {
+      imageId: currentImage.id,
+      rect: selectedRect,
+      instruction: localInstruction.trim(),
+    };
+    if (localReference) input.reference = localReference;
     setSheet(null);
     try {
       setBottomTab('chat');
-      const input: Record<string, unknown> = {
-        imageId: currentImage.id,
-        rect: selectedRect,
-        instruction: localInstruction.trim(),
-      };
-      if (localReference) input.reference = localReference;
-      const result = await api.localEdit(projectId, input);
-      const task = await api.getTask(projectId, result.taskId);
-      setActiveTask(task);
+      await runTracked(() => api.localEdit(projectId, input));
       setLocalInstruction('');
       setLocalReference(null);
       setSelectedRect(null);
@@ -395,21 +415,24 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
   /** Crop the selected region from the original image and submit extract-asset. */
   async function submitExtract() {
     if (!currentImage || !selectedRect) return;
-    setExtractBusy(true);
-    try {
+    // 固化选区与说明，裁剪 + 提交整体可重试
+    const imageId = currentImage.id;
+    const rect = selectedRect;
+    const hint = extractHint.trim();
+    const run = async (): Promise<GenerateResult> => {
       const width = currentImage.width;
       const height = currentImage.height;
       if (!width || !height) throw new Error('无法读取原图尺寸');
-      const cropX = Math.round((selectedRect.x / 100) * width);
-      const cropY = Math.round((selectedRect.y / 100) * height);
-      const cropW = Math.min(width - cropX, Math.max(1, Math.round((selectedRect.width / 100) * width)));
-      const cropH = Math.min(height - cropY, Math.max(1, Math.round((selectedRect.height / 100) * height)));
+      const cropX = Math.round((rect.x / 100) * width);
+      const cropY = Math.round((rect.y / 100) * height);
+      const cropW = Math.min(width - cropX, Math.max(1, Math.round((rect.width / 100) * width)));
+      const cropH = Math.min(height - cropY, Math.max(1, Math.round((rect.height / 100) * height)));
       if (cropW < 8 || cropH < 8) throw new Error('框选区域太小，请重新框选');
 
       const fullUrl = resolveUrl(currentImage.url);
       if (!fullUrl) throw new Error('图片地址无效');
       setBusyLabel('正在下载原图…');
-      const localUri = await downloadToCache(fullUrl, `extract-src-${currentImage.id}`);
+      const localUri = await downloadToCache(fullUrl, `extract-src-${imageId}`);
       let scale = 1;
       if (Math.max(cropW, cropH) > 2048) scale = 2048 / Math.max(cropW, cropH);
       if (Math.min(cropW, cropH) * scale < 256) scale = 256 / Math.min(cropW, cropH);
@@ -420,16 +443,18 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       if (!rendered.base64) throw new Error('截图生成失败，请重试');
 
       setBusyLabel('正在提交任务…');
-      setSheet(null);
-      setBottomTab('chat');
-      const result = await api.extractAsset(projectId, {
-        imageId: currentImage.id,
-        rect: selectedRect,
+      return api.extractAsset(projectId, {
+        imageId,
+        rect,
         crop: { data: rendered.base64, mimeType: 'image/jpeg' },
-        hint: extractHint.trim(),
+        hint,
       });
-      const task = await api.getTask(projectId, result.taskId);
-      setActiveTask(task);
+    };
+    setExtractBusy(true);
+    try {
+      setBottomTab('chat');
+      await runTracked(run);
+      setSheet(null);
       setExtractHint('');
       setSelectedRect(null);
     } catch (e) {
@@ -475,6 +500,29 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
       setBusyLabel('');
       if (await Sharing.isAvailableAsync()) {
         await Sharing.shareAsync(uri, { mimeType: 'application/zip', dialogTitle: `V${version.number} 图片` });
+      } else {
+        notify(`已下载到本地：${uri}`);
+      }
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setBusyLabel('');
+    }
+  }
+
+  /** 保存/分享当前预览的原图（iOS 可存入相册，Android 由分享面板接管） */
+  async function sharePreview() {
+    if (!preview) return;
+    const fullUrl = resolveUrl(preview.image.url);
+    if (!fullUrl) { notify('图片地址无效', 'error'); return; }
+    const ext = /\.png($|\?)/i.test(fullUrl) ? 'png' : /\.webp($|\?)/i.test(fullUrl) ? 'webp' : 'jpg';
+    try {
+      setBusyLabel('正在下载原图…');
+      const uri = await downloadToCache(fullUrl, `preview-${preview.image.id}.${ext}`);
+      setBusyLabel('');
+      if (await Sharing.isAvailableAsync()) {
+        const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+        await Sharing.shareAsync(uri, { mimeType, dialogTitle: '保存 / 分享图片' });
       } else {
         notify(`已下载到本地：${uri}`);
       }
@@ -720,6 +768,19 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
 
       {/* Input bar */}
       <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        {failedTask ? (
+          <View style={styles.failedBar}>
+            <Text style={styles.failedText} numberOfLines={2}>{failedTask.error || '任务失败'}</Text>
+            {failedTask.retryable ? (
+              <Pressable style={styles.failedRetry} onPress={retryFailed}>
+                <Text style={styles.failedRetryText}>重试</Text>
+              </Pressable>
+            ) : null}
+            <Pressable hitSlop={6} onPress={() => setFailedTask(null)}>
+              <Icon name="close" size={16} color={colors.muted} />
+            </Pressable>
+          </View>
+        ) : null}
         <View style={styles.inputBar}>
           <View style={styles.countRow}>
             <Text style={styles.countLabel}>数量</Text>
@@ -786,13 +847,19 @@ export function WorkspaceScreen({ projectId, models, activeModel, onBack, notify
               <Text style={styles.previewMeta}>
                 {[preview.message.content.modelName, preview.image.width ? `${preview.image.width}×${preview.image.height}` : ''].filter(Boolean).join(' · ')}
               </Text>
-              <Pressable
-                style={styles.previewUseBtn}
-                onPress={() => { useAsCurrent(preview.image); setPreview(null); setBottomTab('canvas'); }}
-              >
-                <Icon name="image" size={15} color="#fff" />
-                <Text style={styles.previewUseText}>设为画布图片</Text>
-              </Pressable>
+              <View style={styles.previewActions}>
+                <Pressable style={styles.previewShareBtn} onPress={() => void sharePreview()}>
+                  <Icon name="share" size={15} color={colors.accent} />
+                  <Text style={styles.previewShareText}>保存 / 分享</Text>
+                </Pressable>
+                <Pressable
+                  style={styles.previewUseBtn}
+                  onPress={() => { useAsCurrent(preview.image); setPreview(null); setBottomTab('canvas'); }}
+                >
+                  <Icon name="image" size={15} color="#fff" />
+                  <Text style={styles.previewUseText}>设为画布图片</Text>
+                </Pressable>
+              </View>
             </View>
           )}
         </View>
@@ -1101,7 +1168,10 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     previewInfo: { paddingHorizontal: spacing.lg, paddingTop: spacing.md, gap: spacing.sm },
     previewPrompt: { color: '#fff', fontSize: fontSize.sm, lineHeight: 19 },
     previewMeta: { color: 'rgba(255,255,255,0.6)', fontSize: fontSize.xs },
-    previewUseBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, backgroundColor: '#6d55f7', marginTop: spacing.xs },
+    previewActions: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.xs },
+    previewShareBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, borderWidth: 1, borderColor: c.accent },
+    previewShareText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
+    previewUseBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, backgroundColor: '#6d55f7' },
     previewUseText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '700' },
     inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
     inputBar: { flexDirection: 'column', padding: spacing.md, backgroundColor: c.card, borderTopWidth: 1, borderTopColor: c.border },
@@ -1126,4 +1196,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     busyOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
     busyCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
     busyText: { color: c.text, fontSize: fontSize.sm },
+    failedBar: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: `${c.danger}14`, borderTopWidth: 1, borderTopColor: `${c.danger}33` },
+    failedText: { flex: 1, fontSize: fontSize.xs, color: c.danger },
+    failedRetry: { paddingHorizontal: spacing.sm, paddingVertical: 4, borderRadius: radius.sm, backgroundColor: c.danger },
+    failedRetryText: { color: '#fff', fontSize: fontSize.xs, fontWeight: '700' },
   });

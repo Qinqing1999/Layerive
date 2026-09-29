@@ -8,6 +8,12 @@ const SERVER_BASE_KEY = 'pixelforge-server-base';
 let authToken: string | null = null;
 let currentBase = API_BASE;
 
+/** 会话过期（曾持有 token 却收到 401）时通知 App 回到登录页 */
+let sessionExpiredHandler: (() => void) | null = null;
+export function setSessionExpiredHandler(handler: (() => void) | null) {
+  sessionExpiredHandler = handler;
+}
+
 export async function setAuthToken(token: string) {
   authToken = token;
   await AsyncStorage.setItem(AUTH_TOKEN_KEY, token);
@@ -64,7 +70,9 @@ async function request<T>(path: string, init?: { method?: string; body?: unknown
 
   const payload = await response.json().catch(() => ({}));
   if (response.status === 401) {
+    const hadSession = Boolean(authToken);
     await clearAuthToken();
+    if (hadSession) sessionExpiredHandler?.();
     throw new Error('登录已过期，请重新登录');
   }
   if (!response.ok) throw new Error((payload as { error?: string }).error || `请求失败（${response.status}）`);
