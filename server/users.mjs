@@ -48,6 +48,11 @@ export function listUsersPublic() {
   return readUsers().map(({ username, role }) => ({ username, role }));
 }
 
+/** 公网部署前自检：默认 admin/admin 账号是否仍然存在 */
+export function hasDefaultAdminCredentials() {
+  return readUsers().some((user) => user.username === 'admin' && user.passwordHash === hash('admin'));
+}
+
 export function createUser(input) {
   const username = String(input?.username || '').trim();
   const password = String(input?.password || '');

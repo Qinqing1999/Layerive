@@ -8,7 +8,7 @@ import path from 'node:path';
 import { APP_ROOT, CONFIG_ROOT, DATA_ROOT, db, closeDatabase, ensureProjectDirs, GALLERY_ROOT, imageDto, now, parseJson, PROJECTS_ROOT, projectDto, uid } from './db.mjs';
 import { makeDemoPng, makeThumbnailPng, readImageDimensions } from './png.mjs';
 import { isSenseNovaLegacyVisionEndpoint, isSenseNovaTokenChatEndpoint, normalizeBaseUrl, pickApiKey, publicModel, readModels, removeModel, upsertModel, visionApiFormat, visionEndpoint, writeModels } from './models.mjs';
-import { createUser, deleteUser, listUsersPublic, updateUser, verifyLogin } from './users.mjs';
+import { createUser, deleteUser, hasDefaultAdminCredentials, listUsersPublic, updateUser, verifyLogin } from './users.mjs';
 import { createZip, readZip } from './zip.mjs';
 import { composeLocalReference, normalizeLocalImage, normalizeSenseNovaInput, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
 
@@ -16,6 +16,11 @@ const PORT = Number(process.env.PIXELFLOW_API_PORT || 8788);
 // Loopback by default. PIXELFLOW_API_HOST=0.0.0.0 opts in to LAN access for the
 // mobile app; every /api route still requires a valid session token.
 const HOST = process.env.PIXELFLOW_API_HOST || '127.0.0.1';
+// PIXELFLOW_PUBLIC=1 部署到公网（云服务器/反向代理/隧道）时开启：
+// - 放宽「仅本机」Host 守卫，允许任意域名访问（鉴权仍由 Bearer 头 / 会话 Cookie 把关）
+// - 登录成功时下发 HttpOnly 会话 Cookie（桌面网页的 <img> 无法携带 Authorization 头）
+// - 登录接口启用按 IP 的失败限速
+const PUBLIC_MODE = process.env.PIXELFLOW_PUBLIC === '1';
 const DIST_ROOT = path.join(APP_ROOT, 'dist');
 const MODELS_CONFIG_PATH = path.join(CONFIG_ROOT, 'models.json');
 
@@ -63,8 +68,31 @@ function getBearerToken(req) {
   if (header.startsWith('Bearer ')) return header.slice(7);
   return '';
 }
+
+const SESSION_COOKIE = 'layerive_session';
+function parseCookieHeader(header) {
+  const out = {};
+  for (const part of String(header || '').split(';')) {
+    const index = part.indexOf('=');
+    if (index > 0) {
+      try { out[part.slice(0, index).trim()] = decodeURIComponent(part.slice(index + 1).trim()); } catch { /* 忽略畸形片段 */ }
+    }
+  }
+  return out;
+}
+/** 会话令牌：Bearer 头优先，其次 HttpOnly Cookie（桌面网页 <img> 等无法自定义头的请求） */
+function getSessionToken(req) {
+  return getBearerToken(req) || parseCookieHeader(req.headers.cookie)[SESSION_COOKIE] || '';
+}
+/** 登录成功时下发的会话 Cookie；经 HTTPS 反代（x-forwarded-proto）时自动加 Secure */
+function sessionCookie(value, req, maxAge = 30 * 24 * 3600) {
+  const parts = [`${SESSION_COOKIE}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${maxAge}`];
+  const proto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+  if (proto === 'https' || process.env.PIXELFLOW_COOKIE_SECURE === '1') parts.push('Secure');
+  return parts.join('; ');
+}
 function requireAuth(req) {
-  const session = getSession(getBearerToken(req));
+  const session = getSession(getSessionToken(req));
   if (!session) {
     throw Object.assign(new Error('未登录或会话已过期'), { status: 401 });
   }
@@ -302,17 +330,60 @@ function assertLocalUiRequest(req) {
   // (it lives in the server's sessions file and the user's logged-in app), so a
   // valid session is accepted in place of the local-origin evidence below —
   // including for /files/ and /gallery-files/ image requests, which carry the
-  // token in an Authorization header. Everything else still needs a local Host
-  // header, which keeps DNS-rebinding and cross-site reads blocked.
-  if (isValidSession(getBearerToken(req))) return;
+  // token in an Authorization header (mobile) or the session cookie (desktop
+  // web). Everything else still needs a local Host header, which keeps
+  // DNS-rebinding and cross-site reads blocked — unless the server is
+  // explicitly deployed for public access (PIXELFLOW_PUBLIC=1), where the
+  // same-origin checks below still apply.
+  if (isValidSession(getSessionToken(req))) return;
   const fetchSite = String(req.headers['sec-fetch-site'] || '');
   if (fetchSite && !['same-origin', 'same-site', 'none'].includes(fetchSite)) deny();
   const origin = String(req.headers.origin || '');
-  if (origin && !isLocalHostname(origin)) deny();
+  if (origin) {
+    let sameOrigin = false;
+    try { sameOrigin = new URL(origin).host === req.headers.host; } catch { /* 非法 Origin 视为不同源 */ }
+    if (!sameOrigin && !isLocalHostname(origin)) deny();
+  }
   // A page on attacker.example whose DNS answers 127.0.0.1 looks same-origin to
-  // the browser, but still arrives here carrying its own Host header.
-  if (!isLocalHostname(req.headers.host)) deny();
+  // the browser, but still arrives here carrying its own Host header. Public
+  // deployments skip the local-host requirement (any domain is allowed); the
+  // sec-fetch-site/origin checks above still block cross-site browser reads,
+  // and every authenticated call needs the Bearer header or session cookie.
+  if (!PUBLIC_MODE && !isLocalHostname(req.headers.host)) deny();
 }
+
+// ---- 登录失败限速：同一 IP 在窗口期内连续失败达到上限后锁定（公网部署必备） ----
+const LOGIN_WINDOW_MS = 10 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 10;
+const loginFailures = new Map(); // ip -> { count, firstAt, lockedUntil }
+function clientIpOf(req) {
+  // 经反向代理时取 X-Forwarded-For 首个地址（仅用于限速键，不做鉴权依据）
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.socket.remoteAddress || 'unknown';
+}
+function loginLockSecondsRemaining(ip) {
+  const entry = loginFailures.get(ip);
+  if (!entry) return 0;
+  const now = Date.now();
+  if (entry.lockedUntil > now) return Math.ceil((entry.lockedUntil - now) / 1000);
+  if (now - entry.firstAt > LOGIN_WINDOW_MS) loginFailures.delete(ip);
+  return 0;
+}
+function recordLoginFailure(ip) {
+  const entry = loginFailures.get(ip);
+  if (!entry || Date.now() - entry.firstAt > LOGIN_WINDOW_MS) {
+    loginFailures.set(ip, { count: 1, firstAt: Date.now(), lockedUntil: 0 });
+    return;
+  }
+  entry.count += 1;
+  if (entry.count >= LOGIN_MAX_FAILURES) entry.lockedUntil = Date.now() + LOGIN_WINDOW_MS;
+}
+setInterval(() => {
+  const now = Date.now();
+  for (const [ip, entry] of loginFailures) {
+    if (now - entry.firstAt > LOGIN_WINDOW_MS && entry.lockedUntil < now) loginFailures.delete(ip);
+  }
+}, 60 * 1000).unref();
 
 function zipResponse(res, buffer, downloadName) {
   res.writeHead(200, {
@@ -2628,21 +2699,32 @@ const server = http.createServer(async (req, res) => {
 
     // Auth endpoints (no session required)
     if (pathname === '/api/auth/login' && req.method === 'POST') {
+      const ip = clientIpOf(req);
+      const lockSeconds = loginLockSecondsRemaining(ip);
+      if (lockSeconds > 0) return json(res, 429, { error: `失败次数过多，请约 ${Math.max(1, Math.ceil(lockSeconds / 60))} 分钟后再试` });
       const input = await body(req);
       const user = verifyLogin(input.username, input.password);
-      if (!user) return json(res, 401, { error: '用户名或密码错误' });
+      if (!user) {
+        recordLoginFailure(ip);
+        return json(res, 401, { error: '用户名或密码错误' });
+      }
+      loginFailures.delete(ip);
       const token = createSession(user);
+      // 公网模式下同时下发 HttpOnly 会话 Cookie：桌面网页的 <img> 请求
+      // 无法携带 Authorization 头，浏览器会自动附带 Cookie 完成鉴权
+      res.setHeader('Set-Cookie', sessionCookie(token, req));
       return json(res, 200, { token, username: user.username, role: user.role });
     }
     if (pathname === '/api/auth/check' && req.method === 'GET') {
-      const session = getSession(getBearerToken(req));
+      const session = getSession(getSessionToken(req));
       return json(res, 200, session
         ? { authenticated: true, username: session.username, role: session.role }
         : { authenticated: false, username: '', role: '' });
     }
     if (pathname === '/api/auth/logout' && req.method === 'POST') {
-      const token = getBearerToken(req);
+      const token = getBearerToken(req) || parseCookieHeader(req.headers.cookie)[SESSION_COOKIE] || '';
       if (token) { sessions.delete(token); void saveSessions(); }
+      res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
       return json(res, 200, { ok: true });
     }
 
@@ -2921,4 +3003,12 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => console.log(`Layerive API running at http://${HOST}:${server.address().port}`));
+server.listen(PORT, HOST, () => {
+  console.log(`Layerive API running at http://${HOST}:${server.address().port}`);
+  if (PUBLIC_MODE) {
+    console.log('已启用公网访问模式（PIXELFLOW_PUBLIC=1）：任意域名可访问，鉴权由会话令牌/Cookie 与登录限速保障。');
+    if (hasDefaultAdminCredentials()) {
+      console.warn('⚠️  警告：仍存在默认账号 admin/admin。公网部署前请务必在管理页修改默认密码！');
+    }
+  }
+});
