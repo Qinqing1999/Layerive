@@ -375,6 +375,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       createdAt: new Date().toISOString(),
       finishedAt: null,
     });
+    // 立即刷新 bundle，让对话页显示刚插入的 user message
+    await loadBundle();
   }
 
   function retryFailed() {
