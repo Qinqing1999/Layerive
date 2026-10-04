@@ -45,7 +45,13 @@ export type IconName =
   | 'camera'
   | 'eye'
   | 'eyeOff'
-  | 'more';
+  | 'more'
+  | 'rotate'
+  | 'flipH'
+  | 'flipV'
+  | 'undo'
+  | 'redo'
+  | 'aspectRatio';
 
 type IconProps = {
   name: IconName | string;
@@ -99,6 +105,12 @@ const ICON_MAP: Record<string, keyof typeof Ionicons.glyphMap> = {
   eye: 'eye',
   eyeOff: 'eye-off',
   more: 'ellipsis-horizontal',
+  rotate: 'refresh-outline',
+  flipH: 'swap-horizontal',
+  flipV: 'swap-vertical',
+  undo: 'arrow-undo',
+  redo: 'arrow-redo',
+  aspectRatio: 'crop-outline',
 };
 
 export function Icon({ name, size = 18, color = '#8b909b' }: IconProps) {

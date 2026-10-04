@@ -19,6 +19,8 @@ import {
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as Sharing from 'expo-sharing';
+import * as FileSystem from 'expo-file-system';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } from '../api';
 import { outpaintPresets } from '../sizes';
@@ -127,6 +129,9 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const [extractHint, setExtractHint] = useState('');
   const [extractBusy, setExtractBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState('');
+  /** 撤销/重做栈：记录本地变换（旋转/翻转）前的图片信息 */
+  const [undoStack, setUndoStack] = useState<{ imageId: string; url: string }[]>([]);
+  const [redoStack, setRedoStack] = useState<{ imageId: string; url: string }[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   /** 最近一次提交（按任务 ID 记录），任务失败时可原样重发 */
@@ -176,23 +181,37 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     return map;
   }, [bundle]);
 
-  const loadBundle = useCallback(async () => {
+  const loadBundle = useCallback(async (): Promise<ProjectBundle | null> => {
     const reqId = ++bundleReqIdRef.current;
     try {
       const data = await api.getProject(projectId);
       // 竞态保护：只接受最新一次请求的结果
-      if (reqId !== bundleReqIdRef.current) return;
+      if (reqId !== bundleReqIdRef.current) return null;
       setBundle(data);
       // 草稿仅首次加载恢复，避免轮询刷新覆盖用户正在输入的内容
       if (!draftRestoredRef.current) {
         draftRestoredRef.current = true;
         const draft = data.project.draft as { prompt?: string; count?: number };
-        if (draft?.prompt) setPrompt(draft.prompt);
-        if (typeof draft?.count === 'number') setCount(draft.count);
+        if (draft?.prompt) {
+          setPrompt(draft.prompt);
+          if (typeof draft?.count === 'number') setCount(draft.count);
+        } else {
+          // 服务端无草稿时回退读取 AsyncStorage 本地副本（App 被杀后恢复）
+          try {
+            const local = await AsyncStorage.getItem(`layerive-draft:${projectId}`);
+            if (local) {
+              const localDraft = JSON.parse(local) as { prompt?: string; count?: number };
+              if (localDraft?.prompt) setPrompt(localDraft.prompt);
+              if (typeof localDraft?.count === 'number') setCount(localDraft.count);
+            }
+          } catch { /* ignore */ }
+        }
       }
+      return data;
     } catch (e) {
-      if (reqId !== bundleReqIdRef.current) return;
+      if (reqId !== bundleReqIdRef.current) return null;
       notify((e as Error).message, 'error');
+      return null;
     } finally {
       if (reqId === bundleReqIdRef.current) setLoading(false);
     }
@@ -213,14 +232,21 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     return () => { try { subscription?.remove(); } catch { /* ignore */ } };
   }, [handleBack]);
 
-  // 草稿防抖保存到服务端
+  // 草稿防抖保存到服务端 + AsyncStorage 本地副本
   useEffect(() => {
     if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
     draftTimerRef.current = setTimeout(async () => {
       if (!bundle) return;
+      const draft = { prompt: prompt.trim(), count };
+      // 先写本地副本（防止 App 被杀后草稿丢失）
       try {
-        await api.updateProject(projectId, { draft: { prompt: prompt.trim(), count } });
+        await AsyncStorage.setItem(`layerive-draft:${projectId}`, JSON.stringify(draft));
       } catch { /* ignore */ }
+      // 再保存到服务端，成功后清理本地副本
+      try {
+        await api.updateProject(projectId, { draft });
+        await AsyncStorage.removeItem(`layerive-draft:${projectId}`);
+      } catch { /* 网络失败时保留本地副本 */ }
     }, 900);
     return () => { if (draftTimerRef.current) clearTimeout(draftTimerRef.current); };
   }, [prompt, count, projectId, bundle]);
@@ -628,12 +654,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     const doDelete = async (force: boolean) => {
       try {
         await api.deleteVersion(projectId, version.id, force);
-        await loadBundle();
-        // 如果删除的是当前画布版本，切换到父版本或最近可用版本
+        const fresh = await loadBundle();
+        // 如果删除的是当前画布版本，基于刷新后的 bundle 切换到父版本或最近可用版本
         const isCurrent = currentImage?.versionId === version.id;
-        if (isCurrent) {
-          const parentVer = bundle?.versions.find((v) => v.id === version.parentVersionId && v.status === 'completed');
-          const fallbackVer = bundle?.versions.find((v) => v.id !== version.id && v.status === 'completed');
+        if (isCurrent && fresh) {
+          const parentVer = fresh.versions.find((v) => v.id === version.parentVersionId && v.status === 'completed');
+          const fallbackVer = fresh.versions.find((v) => v.id !== version.id && v.status === 'completed');
           const targetVer = parentVer || fallbackVer;
           if (targetVer) {
             const targetImg = targetVer.outputs.find((img) => img.fileSize > 0) || targetVer.outputs[0];
@@ -738,6 +764,68 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     } catch (e) {
       notify((e as Error).message, 'error');
     }
+  }
+
+  /** 旋转/翻转当前画布图片（本地处理，不上传新版本） */
+  async function transformImage(action: 'rotate90' | 'flipH' | 'flipV') {
+    if (!currentImage || uploading) return;
+    const fullUrl = resolveUrl(currentImage.url);
+    if (!fullUrl) { notify('图片地址无效', 'error'); return; }
+    setUploading(true);
+    setBusyLabel('正在处理图片…');
+    try {
+      const uri = await downloadToCache(fullUrl, `transform-${currentImage.id}.jpg`);
+      const actions: ImageManipulator.Action[] = action === 'rotate90'
+        ? [{ rotate: 90 }]
+        : action === 'flipH'
+        ? [{ flip: ImageManipulator.FlipType.Horizontal }]
+        : [{ flip: ImageManipulator.FlipType.Vertical }];
+      const out = await ImageManipulator.manipulateAsync(uri, actions, { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG, base64: true });
+      if (!out.base64) throw new Error('图片处理失败');
+      // 记录撤销栈
+      setUndoStack((prev) => [...prev, { imageId: currentImage.id, url: currentImage.url }]);
+      setRedoStack([]);
+      const updated = await api.uploadImage(projectId, { data: out.base64, mimeType: 'image/jpeg', name: `transform-${Date.now()}.jpg` });
+      setBundle(updated);
+      // 清理临时文件
+      FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      FileSystem.deleteAsync(out.uri, { idempotent: true }).catch(() => {});
+      notify(action === 'rotate90' ? '已旋转 90°' : action === 'flipH' ? '已水平翻转' : '已垂直翻转');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setUploading(false);
+      setBusyLabel('');
+    }
+  }
+
+  /** 撤销上一次本地变换（回到撤销栈中的前一张图） */
+  function undoTransform() {
+    setUndoStack((prev) => {
+      if (!prev.length) return prev;
+      const last = prev[prev.length - 1];
+      setRedoStack((r) => [...r, { imageId: last.imageId, url: last.url }]);
+      // 切换回上一张图
+      if (bundle) {
+        setBundle({ ...bundle, project: { ...bundle.project, currentImageId: last.imageId } });
+        void api.updateProject(projectId, { currentImageId: last.imageId }).catch(() => {});
+      }
+      return prev.slice(0, -1);
+    });
+  }
+
+  /** 重做上次撤销的变换 */
+  function redoTransform() {
+    setRedoStack((prev) => {
+      if (!prev.length) return prev;
+      const last = prev[prev.length - 1];
+      setUndoStack((u) => [...u, { imageId: last.imageId, url: last.url }]);
+      if (bundle) {
+        setBundle({ ...bundle, project: { ...bundle.project, currentImageId: last.imageId } });
+        void api.updateProject(projectId, { currentImageId: last.imageId }).catch(() => {});
+      }
+      return prev.slice(0, -1);
+    });
   }
 
   // ---- 画布框选：图片在画布内的实际显示区域（aspectFit） ----
@@ -987,6 +1075,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             onUseVersion={useVersion}
             onDeleteVersion={deleteVersion}
             onDownloadVersion={downloadVersionZip}
+            onRefresh={async () => { await loadBundle(); }}
           />
         </View>
       ) : bottomTab === 'canvas' ? (
@@ -1040,6 +1129,10 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             showsHorizontalScrollIndicator={false}
           >
             <ToolBtn icon="compare" label="对比" colors={colors} disabled={!parentImage} onPress={() => setSheet('compare')} />
+            <ToolBtn icon="rotate" label="旋转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('rotate90')} />
+            <ToolBtn icon="flipH" label="翻转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('flipH')} />
+            <ToolBtn icon="undo" label="撤销" colors={colors} disabled={!undoStack.length} onPress={undoTransform} />
+            <ToolBtn icon="redo" label="重做" colors={colors} disabled={!redoStack.length} onPress={redoTransform} />
             <ToolBtn icon="text" label="改字" colors={colors} disabled={!currentImage} onPress={() => setSheet('editText')} />
             <ToolBtn icon="region" label="局部" colors={colors} active={selectMode === 'localEdit'} disabled={!currentImage} onPress={() => toggleSelectMode('localEdit')} />
             <ToolBtn icon="crop" label="提取" colors={colors} active={selectMode === 'extract'} disabled={!currentImage} onPress={() => toggleSelectMode('extract')} />
@@ -1281,15 +1374,16 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             image={currentImage}
             visionModelId={activeVisionModel}
             notify={notify}
-            onSubmitted={(taskId) => {
+            onSubmitted={(taskId, editInput) => {
               setSheet(null);
               setBottomTab('chat');
-              // 通过 runTracked 模式接管任务追踪，确保 lastSubmitRef 被设置（失败时可重试）
+              // 同步设置 lastSubmitRef，submit 为真正的重新提交函数（修复重试断裂）
+              lastSubmitRef.current = {
+                taskId,
+                submit: () => api.editText(projectId, editInput),
+              };
+              // 获取任务状态并设置 activeTask，轮询 effect 接管
               void api.getTask(projectId, taskId).then((task) => {
-                lastSubmitRef.current = {
-                  taskId,
-                  submit: () => api.getTask(projectId, taskId).then(() => ({ taskId, status: 'queued', userMessageId: '' })),
-                };
                 setActiveTask(task);
                 notify('改字任务已提交，等待视觉规划与生成');
               }).catch(() => {

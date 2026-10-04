@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { FlatList, Image, Pressable, StyleSheet, Text, View } from 'react-native';
+import { FlatList, Image, Pressable, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { imageSource, thumbUrl } from '../../api';
 import { useTheme } from '../../theme';
 import { fontSize, radius, spacing } from '../../theme';
@@ -34,12 +34,14 @@ type Props = {
   onUseVersion: (version: Version) => void;
   onDeleteVersion: (version: Version) => void;
   onDownloadVersion: (version: Version) => void;
+  onRefresh?: () => Promise<void>;
 };
 
-export function HistoryModal({ bundle, onUseVersion, onDeleteVersion, onDownloadVersion }: Props) {
+export function HistoryModal({ bundle, onUseVersion, onDeleteVersion, onDownloadVersion, onRefresh }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [refreshing, setRefreshing] = useState(false);
 
   const versions = useMemo(
     () => [...bundle.versions].sort((a, b) => b.number - a.number),
@@ -83,6 +85,17 @@ export function HistoryModal({ bundle, onUseVersion, onDeleteVersion, onDownload
       data={versions}
       keyExtractor={(item: Version) => item.id}
       contentContainerStyle={styles.list}
+      refreshControl={onRefresh ? (
+        <RefreshControl
+          refreshing={refreshing}
+          onRefresh={async () => {
+            setRefreshing(true);
+            try { await onRefresh(); } finally { setRefreshing(false); }
+          }}
+          colors={[colors.accent]}
+          tintColor={colors.accent}
+        />
+      ) : undefined}
       ListEmptyComponent={<Text style={styles.empty}>暂无历史版本</Text>}
       renderItem={({ item }: { item: Version }) => {
         const img = selectedImageOf(item);

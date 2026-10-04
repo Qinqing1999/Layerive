@@ -11,7 +11,7 @@ type Props = {
   image: ProjectImage;
   visionModelId: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
-  onSubmitted: (taskId: string) => void;
+  onSubmitted: (taskId: string, editInput: Record<string, unknown>) => void;
   onCancel: () => void;
 };
 
@@ -56,7 +56,7 @@ export function EditTextModal({ projectId, image, visionModelId, notify, onSubmi
     if (!changed.length) { notify('请先修改、删除或新增至少一段文字', 'error'); return; }
     setSubmitting(true);
     try {
-      const result = await api.editText(projectId, {
+      const editInput = {
         imageId: image.id,
         visionModelId,
         segments: changed.map((seg) => ({
@@ -66,8 +66,9 @@ export function EditTextModal({ projectId, image, visionModelId, notify, onSubmi
           manual: Boolean(seg.manual),
           rect: seg.rect || null,
         })),
-      });
-      onSubmitted(result.taskId);
+      };
+      const result = await api.editText(projectId, editInput);
+      onSubmitted(result.taskId, editInput);
     } catch (e) {
       notify((e as Error).message, 'error');
     } finally {

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFile, writeFile, readdir } from 'node:fs/promises';
+import { readFile, writeFile, readdir, unlink } from 'node:fs/promises';
 import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, createReadStream, statSync } from 'node:fs';
 import sharp from 'sharp';
 import { DatabaseSync } from 'node:sqlite';
@@ -496,9 +496,20 @@ function bundle(projectId) {
   const messages = db.prepare('SELECT * FROM messages WHERE project_id = ? ORDER BY created_at').all(projectId).map((row) => ({
     id: row.id, role: row.role, type: row.message_type, content: parseJson(row.content_json), createdAt: row.created_at,
   }));
-  const versions = db.prepare('SELECT * FROM image_versions WHERE project_id = ? AND deleted_at IS NULL ORDER BY version_number DESC').all(projectId).map((row) => {
+  const versions = db.prepare('SELECT * FROM image_versions WHERE project_id = ? AND deleted_at IS NULL ORDER BY version_number DESC').all(projectId);
+  // 批量查询所有版本的 inputs，避免 N+1 查询
+  const versionIds = versions.map((row) => row.id);
+  const allInputs = versionIds.length
+    ? db.prepare(`SELECT version_id, image_id FROM version_inputs WHERE version_id IN (${versionIds.map(() => '?').join(',')})`).all(...versionIds)
+    : [];
+  const inputsByVersion = new Map();
+  for (const row of allInputs) {
+    if (!inputsByVersion.has(row.version_id)) inputsByVersion.set(row.version_id, []);
+    inputsByVersion.get(row.version_id).push(row);
+  }
+  const result = versions.map((row) => {
     const outputs = images.filter((image) => image.versionId === row.id);
-    const inputRows = db.prepare('SELECT image_id FROM version_inputs WHERE version_id = ?').all(row.id);
+    const inputRows = inputsByVersion.get(row.id) || [];
     return {
       id: row.id,
       number: row.version_number,
@@ -511,7 +522,7 @@ function bundle(projectId) {
       createdAt: row.created_at,
     };
   });
-  return { project: projectDto(projectRow), messages, versions, images };
+  return { project: projectDto(projectRow), messages, versions: result, images };
 }
 
 // SenseNova official 2K sizes are offered in the workspace picker; the picker
@@ -1507,7 +1518,23 @@ async function runGenerationTask(projectId, taskId, context) {
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   } catch (error) {
     const finishedAt = now();
-    const canceled = canceledTasks.has(taskId) || (error.name === 'AbortError' && !controller.signal.reason?.message?.includes('timeout'));
+    const isTimeout = error.name === 'AbortError' && controller.signal.reason?.message?.includes('timeout');
+    const canceled = canceledTasks.has(taskId) || (error.name === 'AbortError' && !isTimeout);
+    // 超时自动重试一次（仅未重试过的情况）
+    if (isTimeout && !context.retried) {
+      updateTaskInput(taskId, { stage: 'retrying' });
+      try {
+        await runGenerationTask(projectId, taskId, { ...context, controller: new AbortController(), retried: true });
+        return;
+      } catch (retryError) {
+        const retryCanceled = canceledTasks.has(taskId) || (retryError.name === 'AbortError' && !controller.signal.reason?.message?.includes('timeout'));
+        const retryMessage = retryCanceled ? '已取消本次生成，输入已保留，可重新发送。' : friendlyModelMessage(retryError.message);
+        db.prepare('UPDATE generation_tasks SET status = ?, error_json = ?, finished_at = ? WHERE id = ?')
+          .run(retryCanceled ? 'canceled' : 'failed', JSON.stringify({ message: `重试失败：${retryMessage}` }), now(), taskId);
+        db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)').run(uid(), projectId, 'assistant', retryCanceled ? 'canceled' : 'error', JSON.stringify({ message: `重试失败：${retryMessage}`, taskId, prompt }), now());
+        return;
+      }
+    }
     const message = canceled ? '已取消本次生成，输入已保留，可重新发送。' : friendlyModelMessage(error.message);
     db.prepare('UPDATE generation_tasks SET status = ?, error_json = ?, finished_at = ? WHERE id = ?')
       .run(canceled ? 'canceled' : 'failed', JSON.stringify({ message }), finishedAt, taskId);
@@ -3011,4 +3038,38 @@ server.listen(PORT, HOST, () => {
       console.warn('⚠️  警告：仍存在默认账号 admin/admin。公网部署前请务必在管理页修改默认密码！');
     }
   }
+  // 启动时清理孤儿临时文件
+  void cleanupOrphanFiles();
+  // 每日定时清理
+  setInterval(() => void cleanupOrphanFiles(), 24 * 60 * 60 * 1000);
 });
+
+/** 清理孤儿临时文件：扫描 temp/、extracts/、local-edits/ 中的孤儿文件 */
+async function cleanupOrphanFiles() {
+  try {
+    const knownPaths = new Set(db.prepare('SELECT file_path FROM images').all().map((r) => r.file_path).filter(Boolean));
+    const projectsDir = PROJECTS_ROOT;
+    await readdir(projectsDir, { withFileTypes: true }).then(async (entries) => {
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const projectId = entry.name;
+        for (const sub of ['temp', 'extracts', 'local-edits']) {
+          const dir = path.join(projectsDir, projectId, sub);
+          try {
+            const files = await readdir(dir);
+            for (const file of files) {
+              const filePath = path.join(projectId, sub, file);
+              // temp/ 目录的文件全部清理（本来就是临时的）
+              // extracts/ 和 local-edits/ 的文件如果不在 images 表中则清理
+              if (sub === 'temp' || !knownPaths.has(filePath)) {
+                await unlink(path.join(dir, file)).catch(() => {});
+              }
+            }
+          } catch { /* 目录不存在 */ }
+        }
+      }
+    }).catch(() => {});
+  } catch (e) {
+    console.error('清理孤儿文件失败：', e.message);
+  }
+}
