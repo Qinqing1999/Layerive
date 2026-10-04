@@ -103,6 +103,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
   const canvasWrapRef = useRef<View | null>(null);
   const canvasOriginRef = useRef({ x: 0, y: 0 });
+  const chatListRef = useRef<FlatList<Message> | null>(null);
   /** 触摸事件 → 画布容器内坐标（pageX 全局稳定，不受 Android 子 View locationX 跳变影响） */
   function canvasPoint(evt: { nativeEvent: { pageX: number; pageY: number } }) {
     return {
@@ -980,13 +981,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       ) : null}
       </View>
       ) : (
-        /* 对话页：全高消息列表 */
+        /* 对话页：全高消息列表（最新在底部） */
         <FlatList
+          ref={chatListRef}
           style={styles.chatList}
           data={messages}
           keyExtractor={(item: Message) => item.id}
           contentContainerStyle={styles.chatListContent}
-          inverted
           renderItem={({ item }: { item: Message }) => (
             <MessageBubble
               message={item}
@@ -995,6 +996,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
               onImagePress={(img) => setPreview({ image: img, message: item })}
             />
           )}
+          onContentSizeChange={() => {
+            // 新消息到达时自动滚动到底部
+            if (messages.length > 0) {
+              chatListRef.current?.scrollToEnd({ animated: false });
+            }
+          }}
         />
       )}
 
