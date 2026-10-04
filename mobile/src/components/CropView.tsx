@@ -7,6 +7,7 @@ import {
   Pressable,
   StyleSheet,
   Text,
+  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
@@ -34,6 +35,9 @@ type DragRect = { x: number; y: number; width: number; height: number };
 
 /** 选区有效性阈值：与工作台「局部」框选一致（占比 ≥2%） */
 const MIN_PERCENT = 2;
+/** 缩放范围 */
+const ZOOM_MIN = 1;
+const ZOOM_MAX = 5;
 
 /**
  * 上传裁剪：与工作台「局部」框选同款交互——
@@ -60,6 +64,59 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
   const originRef = useRef({ x: 0, y: 0 });
   // 手势回调经 ref 读取最新显示区，保证 PanResponder 只创建一次（拖动中不替换 panHandlers）
   const displayRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
+
+  // ---- 缩放状态 ----
+  const [scale, setScale] = useState(1);
+  const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const scaleRef = useRef(1);
+  const offsetRef = useRef({ x: 0, y: 0 });
+  const lastPinchDistRef = useRef(0);
+  const pinchCenterRef = useRef({ x: 0, y: 0 });
+
+  // 双指捏合手势（使用 onTouch 事件）
+  function handleTouchStart(e: any) {
+    const touches = e.nativeEvent.touches || [];
+    if (touches.length === 2) {
+      const t = touches as Array<{ pageX: number; pageY: number }>;
+      const dx = t[0].pageX - t[1].pageX;
+      const dy = t[0].pageY - t[1].pageY;
+      lastPinchDistRef.current = Math.sqrt(dx * dx + dy * dy);
+      pinchCenterRef.current = {
+        x: (t[0].pageX + t[1].pageX) / 2,
+        y: (t[0].pageY + t[1].pageY) / 2,
+      };
+    }
+  }
+
+  function handleTouchMove(e: any) {
+    const touches = e.nativeEvent.touches || [];
+    if (touches.length !== 2) return;
+    const t = touches as Array<{ pageX: number; pageY: number }>;
+    const dx = t[0].pageX - t[1].pageX;
+    const dy = t[0].pageY - t[1].pageY;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+    if (dist === 0) return;
+    const prev = lastPinchDistRef.current;
+    if (prev === 0) { lastPinchDistRef.current = dist; return; }
+    const newScale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scaleRef.current * (dist / prev)));
+    const cx = (t[0].pageX + t[1].pageX) / 2 - originRef.current.x;
+    const cy = (t[0].pageY + t[1].pageY) / 2 - originRef.current.y;
+    const d = displayRef.current;
+    if (!d) return;
+    const ratio = newScale / scaleRef.current;
+    setOffset({
+      x: offsetRef.current.x - (cx - d.x - d.w / 2) * (ratio - 1),
+      y: offsetRef.current.y - (cy - d.y - d.h / 2) * (ratio - 1),
+    });
+    setScale(newScale);
+    scaleRef.current = newScale;
+    offsetRef.current = { x: offsetRef.current.x - (cx - d.x - d.w / 2) * (ratio - 1), y: offsetRef.current.y - (cy - d.y - d.h / 2) * (ratio - 1) };
+    lastPinchDistRef.current = dist;
+  }
+
+  function handleTouchEnd() {
+    lastPinchDistRef.current = 0;
+  }
 
   // 进入裁剪界面时先烘焙 EXIF，得到 normalized uri
   // 这样 <Image> 显示的尺寸和 ImageManipulator 裁剪的尺寸就一致了
@@ -161,6 +218,14 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
     });
   }
 
+  // 重置缩放
+  function resetZoom() {
+    setScale(1);
+    setOffset({ x: 0, y: 0 });
+    scaleRef.current = 1;
+    offsetRef.current = { x: 0, y: 0 };
+  }
+
   // 选区有效性（与「局部」一致：≥2% × ≥2%）
   const percent = useMemo(() => {
     if (!dragRect || !display || display.w < 1 || display.h < 1) return null;
@@ -208,7 +273,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
         </View>
 
         <View style={styles.canvas}>
-          <View ref={containerRef} style={styles.canvasInner} onLayout={handleLayout} {...pan.panHandlers}>
+          <View ref={containerRef} style={styles.canvasInner} onLayout={handleLayout} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} {...pan.panHandlers}>
             {normalizing ? (
               <View style={styles.loadingWrap}>
                 <ActivityIndicator size="large" color={colors.accent} />
@@ -216,29 +281,87 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
               </View>
             ) : display && showUri ? (
               <>
-                <Image
-                  source={{ uri: showUri }}
-                  style={{
-                    position: 'absolute',
-                    left: display.x,
-                    top: display.y,
-                    width: display.w,
-                    height: display.h,
-                  }}
-                  resizeMode="stretch"
-                />
+                {/* 缩放后的图片容器 */}
+                <View style={{
+                  position: 'absolute',
+                  left: display.x + offset.x,
+                  top: display.y + offset.y,
+                  width: display.w * scale,
+                  height: display.h * scale,
+                }}>
+                  <Image
+                    source={{ uri: showUri }}
+                    style={{ width: display.w * scale, height: display.h * scale }}
+                    resizeMode="stretch"
+                  />
+                </View>
                 {/* 选区外四块半透明遮罩 + 边框 + 四角指示点（与「局部」蒙版一致） */}
+                {/* 遮罩位置需要根据缩放调整 */}
                 {dragRect ? (
                   <View pointerEvents="none" style={styles.maskLayer}>
-                    <View style={{ position: 'absolute', left: 0, right: 0, top: 0, height: Math.max(0, dragRect.y), backgroundColor: 'rgba(0,0,0,0.55)' }} />
-                    <View style={{ position: 'absolute', left: 0, right: 0, top: dragRect.y + dragRect.height, bottom: 0, backgroundColor: 'rgba(0,0,0,0.55)' }} />
-                    <View style={{ position: 'absolute', left: 0, top: dragRect.y, width: Math.max(0, dragRect.x), height: dragRect.height, backgroundColor: 'rgba(0,0,0,0.55)' }} />
-                    <View style={{ position: 'absolute', left: dragRect.x + dragRect.width, right: 0, top: dragRect.y, height: dragRect.height, backgroundColor: 'rgba(0,0,0,0.55)' }} />
-                    <View style={{ position: 'absolute', left: dragRect.x, top: dragRect.y, width: dragRect.width, height: dragRect.height, borderWidth: 2, borderColor: colors.accent, borderRadius: 8 }} />
-                    <View style={[styles.cornerDot, { left: dragRect.x - 4, top: dragRect.y - 4 }]} />
-                    <View style={[styles.cornerDot, { left: dragRect.x + dragRect.width - 4, top: dragRect.y - 4 }]} />
-                    <View style={[styles.cornerDot, { left: dragRect.x - 4, top: dragRect.y + dragRect.height - 4 }]} />
-                    <View style={[styles.cornerDot, { left: dragRect.x + dragRect.width - 4, top: dragRect.y + dragRect.height - 4 }]} />
+                    <View style={{
+                      position: 'absolute',
+                      left: display.x + offset.x,
+                      top: display.y + offset.y,
+                      width: display.w * scale,
+                      height: display.h * scale,
+                    }}>
+                      {/* 上方遮罩 */}
+                      <View style={{
+                        position: 'absolute', left: 0, right: 0, top: 0,
+                        height: Math.max(0, ((dragRect.y - display.y - offset.y) / scale)),
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                      }} />
+                      {/* 下方遮罩 */}
+                      <View style={{
+                        position: 'absolute', left: 0, right: 0,
+                        top: ((dragRect.y - display.y - offset.y) / scale) + (dragRect.height / scale),
+                        bottom: 0,
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                      }} />
+                      {/* 左方遮罩 */}
+                      <View style={{
+                        position: 'absolute', left: 0, top: (dragRect.y - display.y - offset.y) / scale,
+                        width: Math.max(0, (dragRect.x - display.x - offset.x) / scale),
+                        height: dragRect.height / scale,
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                      }} />
+                      {/* 右方遮罩 */}
+                      <View style={{
+                        position: 'absolute', right: 0, top: (dragRect.y - display.y - offset.y) / scale,
+                        width: Math.max(0, (display.x + offset.x + display.w * scale - dragRect.x - dragRect.width - offset.x) / scale),
+                        height: dragRect.height / scale,
+                        backgroundColor: 'rgba(0,0,0,0.55)',
+                      }} />
+                      {/* 选区边框 */}
+                      <View style={{
+                        position: 'absolute',
+                        left: (dragRect.x - display.x - offset.x) / scale,
+                        top: (dragRect.y - display.y - offset.y) / scale,
+                        width: dragRect.width / scale,
+                        height: dragRect.height / scale,
+                        borderWidth: 2 / scale,
+                        borderColor: colors.accent,
+                        borderRadius: 8 / scale,
+                      }} />
+                      {/* 四角指示点 */}
+                      {[
+                        { l: dragRect.x, t: dragRect.y },
+                        { l: dragRect.x + dragRect.width, t: dragRect.y },
+                        { l: dragRect.x, t: dragRect.y + dragRect.height },
+                        { l: dragRect.x + dragRect.width, t: dragRect.y + dragRect.height },
+                      ].map((corner, i) => (
+                        <View key={i} style={[
+                          styles.cornerDot,
+                          {
+                            left: (corner.l - display.x - offset.x) / scale - 4 / scale,
+                            top: (corner.t - display.y - offset.y) / scale - 4 / scale,
+                            width: 8 / scale,
+                            height: 8 / scale,
+                          }
+                        ]} />
+                      ))}
+                    </View>
                   </View>
                 ) : null}
               </>
@@ -254,6 +377,37 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
           >
             <Text style={styles.footerGhost}>使用原图</Text>
           </Pressable>
+          {/* 缩放控制 */}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <Pressable
+              style={[styles.zoomBtn, { opacity: scale <= ZOOM_MIN ? 0.3 : 1 }]}
+              onPress={() => {
+                const newScale = Math.max(ZOOM_MIN, scale / 1.5);
+                setScale(newScale);
+                scaleRef.current = newScale;
+              }}
+              disabled={scale <= ZOOM_MIN}
+            >
+              <Text style={styles.zoomText}>−</Text>
+            </Pressable>
+            <Pressable
+              style={styles.zoomBtn}
+              onPress={resetZoom}
+            >
+              <Text style={styles.zoomText}>1×</Text>
+            </Pressable>
+            <Pressable
+              style={[styles.zoomBtn, { opacity: scale >= ZOOM_MAX ? 0.3 : 1 }]}
+              onPress={() => {
+                const newScale = Math.min(ZOOM_MAX, scale * 1.5);
+                setScale(newScale);
+                scaleRef.current = newScale;
+              }}
+              disabled={scale >= ZOOM_MAX}
+            >
+              <Text style={styles.zoomText}>+</Text>
+            </Pressable>
+          </View>
           <Text style={styles.sizeText}>
             {valid && percent ? `${percent.w.toFixed(0)}% × ${percent.h.toFixed(0)}%` : '拖拽框选裁剪范围'}
           </Text>
@@ -318,4 +472,13 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     footerGhost: { color: '#fff', fontSize: 15, fontWeight: '500' },
     footerPrimary: { color: '#fff', fontSize: 15, fontWeight: '600' },
     sizeText: { flex: 1, color: 'rgba(255,255,255,0.7)', fontSize: 13, textAlign: 'center' },
+    zoomBtn: {
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: 'rgba(255,255,255,0.2)',
+      alignItems: 'center',
+      justifyContent: 'center',
+    },
+    zoomText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   });
