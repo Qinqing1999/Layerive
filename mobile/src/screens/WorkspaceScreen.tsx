@@ -114,7 +114,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       y: evt.nativeEvent.pageY - canvasOriginRef.current.y,
     };
   }
-  const [dragRect, setDragRect] = useState<DragRect | null>(null);
+  const [dragRect, setDragRectState] = useState<DragRect | null>(null);
+  const dragRectRef = useRef<DragRect | null>(null);
+  const setDragRect = useCallback((r: DragRect | null) => {
+    dragRectRef.current = r;
+    setDragRectState(r);
+  }, []);
   const dragHandleRef = useRef<DragHandle>('create');
   const rectBeforeDragRef = useRef<DragRect | null>(null);
   const [localInstruction, setLocalInstruction] = useState('');
@@ -165,6 +170,11 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }, [currentVersion, currentImage]);
   const imageModel = models.find((m) => m.id === (bundle?.project.defaultModelId || activeModel)) || models[0] || null;
   const messages = bundle?.messages || [];
+  const imageMap = useMemo(() => {
+    const map = new Map<string, ProjectImage>();
+    if (bundle) for (const img of bundle.images) map.set(img.id, img);
+    return map;
+  }, [bundle]);
 
   const loadBundle = useCallback(async () => {
     const reqId = ++bundleReqIdRef.current;
@@ -780,10 +790,11 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     onPanResponderGrant: (evt) => {
       if (!selectMode || !imageDisplay) return;
       const p = canvasPoint(evt);
-      // 判断触摸点落在已有选区的哪个位置
-      const handle = dragRect ? hitTest(p, dragRect) : 'create';
+      // 判断触摸点落在已有选区的哪个位置（从 ref 读取，避免重建 PanResponder）
+      const cur = dragRectRef.current;
+      const handle = cur ? hitTest(p, cur) : 'create';
       dragHandleRef.current = handle;
-      rectBeforeDragRef.current = dragRect ? { ...dragRect } : null;
+      rectBeforeDragRef.current = cur ? { ...cur } : null;
       // 所有模式都需要记录起始点（move 依赖它计算位移，resize 依赖它判断方向）
       dragStartRef.current = p;
       if (handle === 'create') {
@@ -832,7 +843,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       dragStartRef.current = null;
       rectBeforeDragRef.current = null;
     },
-  }), [selectMode, imageDisplay, dragRect]);
+  }), [selectMode, imageDisplay]);
 
   // 显示坐标 → 图片百分比坐标
   const dragPercent = useMemo<PercentRect | null>(() => {
@@ -929,19 +940,19 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     <View style={[styles.container, { paddingTop: insets.top, backgroundColor: colors.card }]}>
       {/* Top bar */}
       <View style={styles.topbar}>
-        <Pressable onPress={onBack} hitSlop={8} style={styles.topbarBtn}>
+        <Pressable onPress={onBack} hitSlop={8} style={({ pressed }) => [styles.topbarBtn, pressed && { opacity: 0.6 }]}>
           <Icon name="back" size={20} color={colors.text} />
         </Pressable>
         <Text style={styles.topbarTitle} numberOfLines={1}>
           {bundle.project.name}{parentVersionId ? '（从历史继续）' : ''}
         </Text>
         {activeTask ? (
-          <Pressable style={styles.taskPill} onPress={() => setSheet('tasks')}>
+          <Pressable style={({ pressed }) => [styles.taskPill, pressed && { opacity: 0.85 }]} onPress={() => setSheet('tasks')}>
             <ActivityIndicator size="small" color="#fff" />
             <Text style={styles.taskPillText} numberOfLines={1}>{taskLabel}</Text>
           </Pressable>
         ) : null}
-        <Pressable onPress={() => setSheet('gallery')} hitSlop={8} style={styles.topbarBtn}>
+        <Pressable onPress={() => setSheet('gallery')} hitSlop={8} style={({ pressed }) => [styles.topbarBtn, pressed && { opacity: 0.6 }]}>
           <Icon name="gallery" size={18} color={colors.text} />
         </Pressable>
       </View>
@@ -949,15 +960,15 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       {/* 画布操作栏：上传 / 相机 / 保存（仅画布页显示） */}
       {bottomTab === 'canvas' && (
         <View style={styles.actionBar}>
-          <Pressable onPress={pickImage} style={styles.actionBtn} disabled={uploading}>
+          <Pressable onPress={pickImage} style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]} disabled={uploading}>
             {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={16} color={colors.text} />}
             <Text style={styles.actionText}>上传</Text>
           </Pressable>
-          <Pressable onPress={pickCamera} style={styles.actionBtn} disabled={uploading}>
+          <Pressable onPress={pickCamera} style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]} disabled={uploading}>
             <Icon name="camera" size={16} color={colors.text} />
             <Text style={styles.actionText}>拍照</Text>
           </Pressable>
-          <Pressable onPress={() => void saveCurrentImage()} style={[styles.actionBtn, !currentImage && styles.actionBtnDisabled]} disabled={!currentImage}>
+          <Pressable onPress={() => void saveCurrentImage()} style={({ pressed }) => [styles.actionBtn, !currentImage && styles.actionBtnDisabled, pressed && { opacity: 0.7 }]} disabled={!currentImage}>
             <Icon name="download" size={16} color={colors.text} />
             <Text style={styles.actionText}>保存</Text>
           </Pressable>
@@ -1063,10 +1074,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           data={messages}
           keyExtractor={(item: Message) => item.id}
           contentContainerStyle={styles.chatListContent}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={10}
+          windowSize={5}
           renderItem={({ item }: { item: Message }) => (
             <MessageBubble
               message={item}
-              imagesById={imageMapOf(bundle)}
+              imagesById={imageMap}
               colors={colors}
               onImagePress={(img) => setPreview({ image: img, message: item })}
             />
@@ -1168,11 +1182,11 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
               scrollEnabled={false}
             />
             {activeTask ? (
-              <Pressable style={[styles.sendBtn, { backgroundColor: colors.danger }]} onPress={cancelTask}>
+              <Pressable style={({ pressed }) => [styles.sendBtn, { backgroundColor: colors.danger }, pressed && { opacity: 0.85 }]} onPress={cancelTask}>
                 <Icon name="stop" size={16} color="#fff" />
               </Pressable>
             ) : (
-              <Pressable style={[styles.sendBtn, !prompt.trim() && { opacity: 0.5 }]} onPress={submitGenerate} disabled={!prompt.trim()}>
+              <Pressable style={({ pressed }) => [styles.sendBtn, !prompt.trim() && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={submitGenerate} disabled={!prompt.trim()}>
                 <Icon name="send" size={16} color="#fff" />
               </Pressable>
             )}
@@ -1434,12 +1448,6 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       )}
     </View>
   );
-}
-
-function imageMapOf(bundle: ProjectBundle): Map<string, ProjectImage> {
-  const map = new Map<string, ProjectImage>();
-  for (const img of bundle.images) map.set(img.id, img);
-  return map;
 }
 
 /** 数量下拉选择：替代占宽的四枚按钮，节省输入栏空间 */

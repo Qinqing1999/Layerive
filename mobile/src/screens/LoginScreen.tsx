@@ -1,9 +1,10 @@
 import React, { useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, getServerBase, setAuthToken, setServerBase } from '../api';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
+import { Icon } from '../components/Icon';
 
 type Props = {
   onSuccess: () => void;
@@ -18,15 +19,16 @@ export function LoginScreen({ onSuccess, notify }: Props) {
   const [password, setPassword] = useState('');
   const [server, setServer] = useState(getServerBase());
   const [showServer, setShowServer] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
 
   async function submit() {
-    if (loading || !password) return;
+    if (loading || !password || !username.trim()) return;
     setLoading(true);
     try {
       const trimmed = server.trim();
       if (trimmed && trimmed !== getServerBase()) await setServerBase(trimmed);
-      const result = await api.login(username, password);
+      const result = await api.login(username.trim(), password);
       await setAuthToken(result.token);
       onSuccess();
     } catch (error) {
@@ -37,48 +39,86 @@ export function LoginScreen({ onSuccess, notify }: Props) {
   }
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
-      <View style={styles.card}>
-        <View style={styles.brand}>
-          <View style={styles.logo}><Text style={styles.logoText}>P</Text></View>
-          <Text style={styles.title}>像素变换</Text>
-          <Text style={styles.subtitle}>AI 图片创作工作台</Text>
-        </View>
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1 }}
+    >
+      <View style={[styles.container, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
+        <View style={styles.card}>
+          <View style={styles.brand}>
+            <View style={styles.logo}><Text style={styles.logoText}>P</Text></View>
+            <Text style={styles.title}>像素变换</Text>
+            <Text style={styles.subtitle}>AI 图片创作工作台</Text>
+          </View>
 
-        <View style={styles.field}>
-          <Text style={styles.label}>用户名</Text>
-          <TextInput style={styles.input} value={username} onChangeText={setUsername} placeholder="用户名" placeholderTextColor={colors.muted} editable={!loading} autoCapitalize="none" />
-        </View>
-
-        <View style={styles.field}>
-          <Text style={styles.label}>密码</Text>
-          <TextInput style={styles.input} value={password} onChangeText={setPassword} placeholder="请输入密码" placeholderTextColor={colors.muted} secureTextEntry editable={!loading} />
-        </View>
-
-        <View style={styles.field}>
-          <Pressable onPress={() => setShowServer((v) => !v)}>
-            <Text style={styles.toggleServer}>{showServer ? '收起服务器设置' : '连接其他服务器（真机访问电脑）'}</Text>
-          </Pressable>
-          {showServer && (
+          <View style={styles.field}>
+            <Text style={styles.label}>用户名</Text>
             <TextInput
               style={styles.input}
-              value={server}
-              onChangeText={setServer}
-              placeholder="http://192.168.x.x:8788"
+              value={username}
+              onChangeText={setUsername}
+              placeholder="用户名"
               placeholderTextColor={colors.muted}
               editable={!loading}
               autoCapitalize="none"
-              keyboardType="url"
+              autoCorrect={false}
             />
-          )}
-          {showServer ? <Text style={styles.hint}>电脑端需以 PIXELFLOW_API_HOST=0.0.0.0 npm start 启动，并使用电脑的局域网 IP。</Text> : null}
-        </View>
+          </View>
 
-        <Pressable style={[styles.button, (loading || !password) && { opacity: 0.5 }]} onPress={submit} disabled={loading || !password}>
-          {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>{loading ? '登录中…' : '登录'}</Text>}
-        </Pressable>
+          <View style={styles.field}>
+            <Text style={styles.label}>密码</Text>
+            <View style={styles.passwordRow}>
+              <TextInput
+                style={[styles.input, { flex: 1, marginTop: 0 }]}
+                value={password}
+                onChangeText={setPassword}
+                placeholder="请输入密码"
+                placeholderTextColor={colors.muted}
+                secureTextEntry={!showPassword}
+                editable={!loading}
+                autoCapitalize="none"
+                autoCorrect={false}
+              />
+              <Pressable
+                onPress={() => setShowPassword((v) => !v)}
+                style={styles.eyeBtn}
+                hitSlop={8}
+              >
+                <Icon name={showPassword ? 'eye' : 'eyeOff'} size={18} color={colors.muted} />
+              </Pressable>
+            </View>
+          </View>
+
+          <View style={styles.field}>
+            <Pressable onPress={() => setShowServer((v) => !v)}>
+              <Text style={styles.toggleServer}>{showServer ? '收起服务器设置' : '连接其他服务器（真机访问电脑）'}</Text>
+            </Pressable>
+            {showServer && (
+              <TextInput
+                style={styles.input}
+                value={server}
+                onChangeText={setServer}
+                placeholder="http://192.168.x.x:8788"
+                placeholderTextColor={colors.muted}
+                editable={!loading}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+              />
+            )}
+            {showServer ? <Text style={styles.hint}>电脑端需以 PIXELFLOW_API_HOST=0.0.0.0 npm start 启动，并使用电脑的局域网 IP。</Text> : null}
+          </View>
+
+          <Pressable
+            style={({ pressed }) => [styles.button, (loading || !password || !username.trim()) && { opacity: 0.5 }, pressed && { opacity: 0.85 }]}
+            onPress={submit}
+            disabled={loading || !password || !username.trim()}
+          >
+            {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>登录</Text>}
+          </Pressable>
+        </View>
       </View>
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -94,6 +134,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     field: { marginBottom: spacing.md },
     label: { fontSize: fontSize.sm, fontWeight: '600', color: c.text, marginBottom: spacing.xs },
     input: { height: 44, borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, paddingHorizontal: spacing.md, fontSize: fontSize.md, color: c.text, backgroundColor: c.input, marginTop: spacing.xs },
+    passwordRow: { flexDirection: 'row', alignItems: 'center', marginTop: spacing.xs },
+    eyeBtn: { position: 'absolute', right: 8, top: 4, padding: spacing.xs },
     toggleServer: { fontSize: fontSize.xs, color: c.accent, fontWeight: '600' },
     hint: { fontSize: 10, color: c.muted, marginTop: spacing.xs },
     button: { height: 46, borderRadius: radius.sm, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', marginTop: spacing.sm },

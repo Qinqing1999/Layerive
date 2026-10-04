@@ -42,7 +42,10 @@ export type IconName =
   | 'zip'
   | 'chevronRight'
   | 'chevronDown'
-  | 'camera';
+  | 'camera'
+  | 'eye'
+  | 'eyeOff'
+  | 'more';
 
 type IconProps = {
   name: IconName | string;
@@ -93,6 +96,9 @@ const ICON_MAP: Record<string, keyof typeof Ionicons.glyphMap> = {
   chevronRight: 'chevron-forward',
   chevronDown: 'chevron-down',
   camera: 'camera',
+  eye: 'eye',
+  eyeOff: 'eye-off',
+  more: 'ellipsis-horizontal',
 };
 
 export function Icon({ name, size = 18, color = '#8b909b' }: IconProps) {

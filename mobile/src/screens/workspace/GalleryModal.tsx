@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Image, Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api, imageSource } from '../../api';
 import { useTheme } from '../../theme';
 import { fontSize, radius, spacing } from '../../theme';
@@ -93,13 +93,18 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
   }
 
   async function deleteEntry(entry: GalleryEntryItem) {
-    try {
-      await api.galleryDelete(entry.id);
-      await load();
-      notify('已删除');
-    } catch (e) {
-      notify((e as Error).message, 'error');
-    }
+    Alert.alert('确认删除', `删除「${entry.title}」？删除后不可恢复。`, [
+      { text: '取消', style: 'cancel' },
+      { text: '删除', style: 'destructive', onPress: async () => {
+        try {
+          await api.galleryDelete(entry.id);
+          await load();
+          notify('已删除');
+        } catch (e) {
+          notify((e as Error).message, 'error');
+        }
+      } },
+    ]);
   }
 
   return (

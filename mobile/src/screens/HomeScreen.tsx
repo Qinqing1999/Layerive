@@ -54,8 +54,8 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
 
   const filtered = useMemo(() => {
     let list = projects.filter((p) => !search || p.name.toLowerCase().includes(search.toLowerCase()));
-    if (filter === 'favorite') list.sort((a, b) => (b.isFavorite ? 1 : 0) - (a.isFavorite ? 1 : 0) || b.updatedAt.localeCompare(a.updatedAt));
-    else list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    if (filter === 'favorite') list = list.filter((p) => p.isFavorite);
+    list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return list;
   }, [projects, search, filter]);
 
@@ -250,6 +250,10 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
           keyExtractor={(item: Project) => item.id}
           numColumns={2}
           columnWrapperStyle={{ gap: spacing.md }}
+          removeClippedSubviews={true}
+          maxToRenderPerBatch={6}
+          windowSize={4}
+          keyboardShouldPersistTaps="handled"
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefreshData} tintColor={colors.accent} />}
           contentContainerStyle={[styles.listContent, { paddingBottom: (insets.bottom || 0) + spacing.xxl }]}
           renderItem={({ item }: { item: Project }) => (
@@ -263,7 +267,14 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
           ListEmptyComponent={
             <View style={styles.empty}>
               <Icon name="image" size={48} color={colors.border} />
-              <Text style={styles.emptyText}>暂无项目，点击「新建项目」开始创作</Text>
+              <Text style={styles.emptyText}>暂无项目，开始你的第一次创作</Text>
+              <Pressable
+                style={({ pressed }) => [styles.createBtn, pressed && { opacity: 0.85 }]}
+                onPress={() => setCreateOpen(true)}
+              >
+                <Icon name="plus" size={16} color="#fff" />
+                <Text style={styles.createBtnText}>新建项目</Text>
+              </Pressable>
             </View>
           }
         />
@@ -366,7 +377,7 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
 function ProjectCard({ item, colors, onPress, onMenu }: { item: Project; colors: ReturnType<typeof useTheme>['colors']; onPress: () => void; onMenu: () => void }) {
   const styles = makeStyles(colors);
   return (
-    <Pressable style={styles.card} onPress={onPress}>
+    <Pressable style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }]} onPress={onPress}>
       {item.coverUrl ? (
         <Image source={imageSource(thumbUrl(item.coverUrl))} style={styles.cardCover} resizeMode="cover" />
       ) : (
@@ -377,8 +388,8 @@ function ProjectCard({ item, colors, onPress, onMenu }: { item: Project; colors:
       <View style={styles.cardBody}>
         <View style={styles.cardHeader}>
           <Text style={styles.cardTitle} numberOfLines={1}>{item.name}</Text>
-          <Pressable onPress={onMenu} hitSlop={8} style={styles.iconBtn}>
-            <Text style={styles.moreDots}>⋯</Text>
+          <Pressable onPress={onMenu} hitSlop={8} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
+            <Icon name="more" size={18} color={colors.muted} />
           </Pressable>
         </View>
         {item.isFavorite ? <Icon name="starFilled" size={13} color={colors.warning} /> : null}
