@@ -304,6 +304,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }, [currentImage?.id]);
 
   // 当服务端未存 width/height 时，运行时探测图片尺寸
+  // 注意：imageSource 传了 1280px 宽度，需用 Image.getSize 获取实际渲染尺寸
   useEffect(() => {
     if (!currentImage || currentImage.width || currentImage.height) return;
     const url = imageSource(currentImage.url, 1280)?.uri;
@@ -740,17 +741,20 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }
 
   // ---- 画布框选：图片在画布内的实际显示区域（aspectFit） ----
+  // 注意：imageSource(url, 1280) 返回的是缩略图，需与缩略图尺寸一致
   const imageDisplay = useMemo(() => {
     const cw = canvasSize.w;
     const ch = canvasSize.h;
-    const iw = currentImage?.width || (runtimeImgSize && runtimeImgSize.id === currentImage?.id ? runtimeImgSize.w : 0);
-    const ih = currentImage?.height || (runtimeImgSize && runtimeImgSize.id === currentImage?.id ? runtimeImgSize.h : 0);
-    if (!cw || !ch || !iw || !ih) return null;
-    const scale = Math.min(cw / iw, ch / ih);
-    const w = iw * scale;
-    const h = ih * scale;
+    // 优先使用 runtimeImgSize（缩略图实际尺寸），其次使用服务端原始尺寸
+    const imgSize = (runtimeImgSize && runtimeImgSize.id === currentImage?.id)
+      ? { w: runtimeImgSize.w, h: runtimeImgSize.h }
+      : { w: currentImage?.width || 0, h: currentImage?.height || 0 };
+    if (!cw || !ch || !imgSize.w || !imgSize.h) return null;
+    const scale = Math.min(cw / imgSize.w, ch / imgSize.h);
+    const w = imgSize.w * scale;
+    const h = imgSize.h * scale;
     return { left: (cw - w) / 2, top: (ch - h) / 2, w, h };
-  }, [canvasSize, currentImage?.width, currentImage?.height, currentImage?.id, runtimeImgSize]);
+  }, [canvasSize, currentImage?.id, currentImage?.width, currentImage?.height, runtimeImgSize]);
 
   /** 判断触摸点落在已有选区的哪个手柄上 */
   function hitTest(p: { x: number; y: number }, rect: DragRect): DragHandle {
