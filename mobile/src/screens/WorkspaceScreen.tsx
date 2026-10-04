@@ -123,6 +123,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   /** 最近一次提交（按任务 ID 记录），任务失败时可原样重发 */
   const lastSubmitRef = useRef<{ taskId: string; submit: () => Promise<GenerateResult> } | null>(null);
   const [failedTask, setFailedTask] = useState<{ error: string | null; retryable: boolean } | null>(null);
+  // 运行时探测的图片尺寸缓存（当服务端未存 width/height 时回退使用）
+  const [runtimeImgSize, setRuntimeImgSize] = useState<{ id: string; w: number; h: number } | null>(null);
 
   const currentImage = useMemo(
     () => bundle?.images.find((img) => img.id === bundle.project.currentImageId) || null,
@@ -243,6 +245,20 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     setSelectMode(null);
     setDragRect(null);
   }, [currentImage?.id]);
+
+  // 当服务端未存 width/height 时，运行时探测图片尺寸
+  useEffect(() => {
+    if (!currentImage || currentImage.width || currentImage.height) return;
+    const url = imageSource(currentImage.url, 1280)?.uri;
+    if (!url) return;
+    let alive = true;
+    Image.getSize(
+      url,
+      (w, h) => { if (alive && currentImage) setRuntimeImgSize({ id: currentImage.id, w, h }); },
+      () => {},
+    );
+    return () => { alive = false; };
+  }, [currentImage?.id, currentImage?.url, currentImage?.width, currentImage?.height]);
 
   async function uploadImage(data: string, mimeType: string, name: string) {
     try {
@@ -656,12 +672,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const imageDisplay = useMemo(() => {
     const cw = canvasSize.w;
     const ch = canvasSize.h;
-    if (!cw || !ch || !currentImage?.width || !currentImage?.height) return null;
-    const scale = Math.min(cw / currentImage.width, ch / currentImage.height);
-    const w = currentImage.width * scale;
-    const h = currentImage.height * scale;
+    const iw = currentImage?.width || (runtimeImgSize && runtimeImgSize.id === currentImage?.id ? runtimeImgSize.w : 0);
+    const ih = currentImage?.height || (runtimeImgSize && runtimeImgSize.id === currentImage?.id ? runtimeImgSize.h : 0);
+    if (!cw || !ch || !iw || !ih) return null;
+    const scale = Math.min(cw / iw, ch / ih);
+    const w = iw * scale;
+    const h = ih * scale;
     return { left: (cw - w) / 2, top: (ch - h) / 2, w, h };
-  }, [canvasSize, currentImage?.width, currentImage?.height]);
+  }, [canvasSize, currentImage?.width, currentImage?.height, currentImage?.id, runtimeImgSize]);
 
   /** 判断触摸点落在已有选区的哪个手柄上 */
   function hitTest(p: { x: number; y: number }, rect: DragRect): DragHandle {
@@ -902,7 +920,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             <Image
               source={imageSource(currentImage.url, 1280)}
               style={{ width: '100%', height: '100%' }}
-              resizeMode="stretch"
+              resizeMode={imageDisplay ? 'stretch' : 'contain'}
             />
           </Pressable>
         ) : (
