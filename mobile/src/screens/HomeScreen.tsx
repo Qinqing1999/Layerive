@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
@@ -376,8 +376,13 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
 
 function ProjectCard({ item, colors, onPress, onMenu }: { item: Project; colors: ReturnType<typeof useTheme>['colors']; onPress: () => void; onMenu: () => void }) {
   const styles = makeStyles(colors);
+  const menuPressedRef = useRef(false);
   return (
-    <Pressable style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }]} onPress={onPress}>
+    <Pressable
+      style={({ pressed }) => [styles.card, pressed && { opacity: 0.9 }]}
+      onPressIn={() => { menuPressedRef.current = false; }}
+      onPress={() => { if (!menuPressedRef.current) onPress(); }}
+    >
       {item.coverUrl ? (
         <Image source={imageSource(thumbUrl(item.coverUrl))} style={styles.cardCover} resizeMode="cover" />
       ) : (
@@ -388,7 +393,12 @@ function ProjectCard({ item, colors, onPress, onMenu }: { item: Project; colors:
       <View style={styles.cardBody}>
         <View style={styles.cardHeader}>
           <Text style={styles.cardTitle} numberOfLines={1}>{item.name}</Text>
-          <Pressable onPress={onMenu} hitSlop={8} style={({ pressed }) => [styles.iconBtn, pressed && { opacity: 0.6 }]}>
+          <Pressable
+            onPressIn={() => { menuPressedRef.current = true; }}
+            onPress={onMenu}
+            hitSlop={12}
+            style={({ pressed }) => [{ padding: spacing.sm }, pressed && { opacity: 0.6 }]}
+          >
             <Icon name="more" size={18} color={colors.muted} />
           </Pressable>
         </View>
