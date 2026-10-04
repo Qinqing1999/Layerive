@@ -104,6 +104,9 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const canvasWrapRef = useRef<View | null>(null);
   const canvasOriginRef = useRef({ x: 0, y: 0 });
   const chatListRef = useRef<FlatList<Message> | null>(null);
+  // 追踪用户是否在列表底部附近（决定新消息是否自动滚动）
+  const isNearBottomRef = useRef(true);
+  const prevMsgCountRef = useRef(0);
   /** 触摸事件 → 画布容器内坐标（pageX 全局稳定，不受 Android 子 View locationX 跳变影响） */
   function canvasPoint(evt: { nativeEvent: { pageX: number; pageY: number } }) {
     return {
@@ -124,6 +127,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   /** 最近一次提交（按任务 ID 记录），任务失败时可原样重发 */
   const lastSubmitRef = useRef<{ taskId: string; submit: () => Promise<GenerateResult> } | null>(null);
   const [failedTask, setFailedTask] = useState<{ error: string | null; retryable: boolean } | null>(null);
+  /** 草稿仅首次加载恢复，避免轮询刷新覆盖用户正在输入的内容 */
+  const draftRestoredRef = useRef(false);
+  /** loadBundle 竞态保护：只接受最新一次请求的结果 */
+  const bundleReqIdRef = useRef(0);
+  /** 轮询连续失败计数 + 任务最长轮询窗口 */
+  const pollFailCountRef = useRef(0);
+  const pollStartRef = useRef(0);
   // 运行时探测的图片尺寸缓存（当服务端未存 width/height 时回退使用）
   const [runtimeImgSize, setRuntimeImgSize] = useState<{ id: string; w: number; h: number } | null>(null);
 
@@ -157,16 +167,24 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const messages = bundle?.messages || [];
 
   const loadBundle = useCallback(async () => {
+    const reqId = ++bundleReqIdRef.current;
     try {
       const data = await api.getProject(projectId);
+      // 竞态保护：只接受最新一次请求的结果
+      if (reqId !== bundleReqIdRef.current) return;
       setBundle(data);
-      const draft = data.project.draft as { prompt?: string; count?: number };
-      if (draft?.prompt) setPrompt(draft.prompt);
-      if (typeof draft?.count === 'number') setCount(draft.count);
+      // 草稿仅首次加载恢复，避免轮询刷新覆盖用户正在输入的内容
+      if (!draftRestoredRef.current) {
+        draftRestoredRef.current = true;
+        const draft = data.project.draft as { prompt?: string; count?: number };
+        if (draft?.prompt) setPrompt(draft.prompt);
+        if (typeof draft?.count === 'number') setCount(draft.count);
+      }
     } catch (e) {
+      if (reqId !== bundleReqIdRef.current) return;
       notify((e as Error).message, 'error');
     } finally {
-      setLoading(false);
+      if (reqId === bundleReqIdRef.current) setLoading(false);
     }
   }, [projectId, notify]);
 
@@ -176,12 +194,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const handleBack = useCallback(() => { onBack(); return true; }, [onBack]);
   useEffect(() => {
     if (Platform.OS !== 'android') return;
+    let subscription: { remove: () => void } | null = null;
     try {
-      BackHandler.addEventListener('hardwareBackPress', handleBack);
+      subscription = BackHandler.addEventListener('hardwareBackPress', handleBack);
     } catch {
       // older RN versions may not support addEventListener API
     }
-    return () => { /* cleanup handled by OS */ };
+    return () => { try { subscription?.remove(); } catch { /* ignore */ } };
   }, [handleBack]);
 
   // 草稿防抖保存到服务端
@@ -222,9 +241,21 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   // Poll the running task until it leaves the queue / "generating".
   useEffect(() => {
     if (!bundle || !activeTask || (activeTask.status !== 'generating' && activeTask.status !== 'queued')) return;
+    pollFailCountRef.current = 0;
+    pollStartRef.current = Date.now();
+    const MAX_POLL_MS = 10 * 60 * 1000; // 10 分钟上限
+    const MAX_FAILS = 5; // 连续失败 5 次停止
     pollRef.current = setInterval(async () => {
+      // 超过最长轮询窗口，视为失败
+      if (Date.now() - pollStartRef.current > MAX_POLL_MS) {
+        setActiveTask(null);
+        setFailedTask({ error: '任务超时（超过 10 分钟），请重试', retryable: lastSubmitRef.current?.taskId === activeTask.id });
+        if (pollRef.current) clearInterval(pollRef.current);
+        return;
+      }
       try {
         const task = await api.getTask(projectId, activeTask.id);
+        pollFailCountRef.current = 0;
         if (task.status === 'generating' || task.status === 'queued') {
           setActiveTask(task);
         } else {
@@ -236,7 +267,22 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           );
           await loadBundle();
         }
-      } catch { /* ignore */ }
+      } catch (e) {
+        pollFailCountRef.current++;
+        const msg = (e as Error).message;
+        // 401 会由 request 层处理会话过期，这里不重复处理
+        if (msg.includes('登录已过期')) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          return;
+        }
+        // 连续失败超过阈值，停止轮询并提示
+        if (pollFailCountRef.current >= MAX_FAILS) {
+          setActiveTask(null);
+          setFailedTask({ error: '网络连接不稳定，任务可能仍在运行，请稍后查看', retryable: false });
+          if (pollRef.current) clearInterval(pollRef.current);
+        }
+        // 其他错误静默重试（网络抖动）
+      }
     }, 2000);
     return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [activeTask, bundle, projectId, loadBundle]);
@@ -572,6 +618,20 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       try {
         await api.deleteVersion(projectId, version.id, force);
         await loadBundle();
+        // 如果删除的是当前画布版本，切换到父版本或最近可用版本
+        const isCurrent = currentImage?.versionId === version.id;
+        if (isCurrent) {
+          const parentVer = bundle?.versions.find((v) => v.id === version.parentVersionId && v.status === 'completed');
+          const fallbackVer = bundle?.versions.find((v) => v.id !== version.id && v.status === 'completed');
+          const targetVer = parentVer || fallbackVer;
+          if (targetVer) {
+            const targetImg = targetVer.outputs.find((img) => img.fileSize > 0) || targetVer.outputs[0];
+            if (targetImg) {
+              await api.updateProject(projectId, { currentImageId: targetImg.id });
+              await loadBundle();
+            }
+          }
+        }
         notify(`V${version.number} 已删除`);
       } catch (e) { notify((e as Error).message, 'error'); }
     };
@@ -836,8 +896,23 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   if (loading || !bundle) {
     return (
       <View style={[styles.loading, { paddingTop: insets.top, backgroundColor: colors.card }]}>
-        <ActivityIndicator size="large" color={colors.accent} />
-        {busyLabel ? <Text style={styles.loadingText}>{busyLabel}</Text> : <Text style={styles.loadingText}>加载中…</Text>}
+        {loading ? (
+          <>
+            <ActivityIndicator size="large" color={colors.accent} />
+            {busyLabel ? <Text style={styles.loadingText}>{busyLabel}</Text> : <Text style={styles.loadingText}>加载中…</Text>}
+          </>
+        ) : (
+          <>
+            <Text style={styles.loadingText}>加载失败</Text>
+            <Pressable
+              hitSlop={8}
+              onPress={() => { setLoading(true); void loadBundle(); }}
+              style={({ pressed }) => [styles.retryBtn, pressed && { opacity: 0.7 }]}
+            >
+              <Text style={styles.retryBtnText}>重试</Text>
+            </Pressable>
+          </>
+        )}
       </View>
     );
   }
@@ -997,11 +1072,20 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             />
           )}
           onContentSizeChange={() => {
-            // 新消息到达时自动滚动到底部
-            if (messages.length > 0) {
+            // 仅当新消息到达且用户接近底部时才自动滚动，不打断阅读历史
+            if (messages.length > prevMsgCountRef.current && isNearBottomRef.current) {
               chatListRef.current?.scrollToEnd({ animated: false });
             }
+            prevMsgCountRef.current = messages.length;
           }}
+          onScroll={({ nativeEvent }) => {
+            // 监听滚动位置：距底部 < 150px 视为"接近底部"
+            const { contentOffset, contentSize } = nativeEvent;
+            const layoutHeight = (nativeEvent as unknown as { layoutMeasurement?: { height: number } }).layoutMeasurement?.height || 800;
+            const distToBottom = contentSize.height - contentOffset.y - layoutHeight;
+            isNearBottomRef.current = distToBottom < 150;
+          }}
+          scrollEventThrottle={16}
         />
       )}
 
@@ -1182,10 +1266,17 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             onSubmitted={(taskId) => {
               setSheet(null);
               setBottomTab('chat');
+              // 通过 runTracked 模式接管任务追踪，确保 lastSubmitRef 被设置（失败时可重试）
               void api.getTask(projectId, taskId).then((task) => {
+                lastSubmitRef.current = {
+                  taskId,
+                  submit: () => api.getTask(projectId, taskId).then(() => ({ taskId, status: 'queued', userMessageId: '' })),
+                };
                 setActiveTask(task);
                 notify('改字任务已提交，等待视觉规划与生成');
-              }).catch(() => {});
+              }).catch(() => {
+                notify('任务已提交，但状态获取失败，请稍后查看', 'error');
+              });
             }}
             onCancel={() => setSheet(null)}
           />
@@ -1563,6 +1654,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     container: { flex: 1, backgroundColor: c.bg },
     loading: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: c.bg },
     loadingText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted },
+    retryBtn: { marginTop: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: radius.sm, backgroundColor: c.accent },
+    retryBtnText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '600' },
     topbar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingTop: spacing.sm, paddingBottom: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border, gap: spacing.sm },
     topbarBtn: { padding: spacing.sm },
     topbarTitle: { flex: 1, textAlign: 'center', fontSize: fontSize.md, fontWeight: '700', color: c.text, marginHorizontal: spacing.sm },

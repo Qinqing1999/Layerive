@@ -55,6 +55,9 @@ export function authHeaders(): Record<string, string> {
   return authToken ? { Authorization: `Bearer ${authToken}` } : {};
 }
 
+/** 防止 401 并发时多次触发 sessionExpiredHandler */
+let sessionExpiredFiring = false;
+
 async function request<T>(path: string, init?: { method?: string; body?: unknown; headers?: Record<string, string> }): Promise<T> {
   const token = await getAuthToken();
   const headers: Record<string, string> = { ...init?.headers };
@@ -62,17 +65,33 @@ async function request<T>(path: string, init?: { method?: string; body?: unknown
   if (token) headers['Authorization'] = `Bearer ${token}`;
 
   const url = path.startsWith('http') ? path : `${currentBase}${path}`;
-  const response = await fetch(url, {
-    method: init?.method || 'GET',
-    headers,
-    body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
-  });
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 20000);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: init?.method || 'GET',
+      headers,
+      body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+      signal: controller.signal,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error('请求超时，请检查网络连接');
+    }
+    throw new Error(`网络请求失败：${(e as Error).message}`);
+  } finally {
+    clearTimeout(timer);
+  }
 
   const payload = await response.json().catch(() => ({}));
   if (response.status === 401) {
     const hadSession = Boolean(authToken);
     await clearAuthToken();
-    if (hadSession) sessionExpiredHandler?.();
+    if (hadSession && !sessionExpiredFiring) {
+      sessionExpiredFiring = true;
+      try { sessionExpiredHandler?.(); } finally { sessionExpiredFiring = false; }
+    }
     throw new Error('登录已过期，请重新登录');
   }
   if (!response.ok) throw new Error((payload as { error?: string }).error || `请求失败（${response.status}）`);
@@ -197,6 +216,15 @@ export async function downloadToCache(path: string, filename: string): Promise<s
   const result = await FileSystem.downloadAsync(target, fileUri, {
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
+  if (result.status === 401) {
+    const hadSession = Boolean(authToken);
+    await clearAuthToken();
+    if (hadSession && !sessionExpiredFiring) {
+      sessionExpiredFiring = true;
+      try { sessionExpiredHandler?.(); } finally { sessionExpiredFiring = false; }
+    }
+    throw new Error('登录已过期，请重新登录');
+  }
   if (result.status !== 200) throw new Error(`下载失败（${result.status}）`);
   return result.uri;
 }
