@@ -105,6 +105,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const [canvasSize, setCanvasSize] = useState({ w: 0, h: 0 });
   const canvasWrapRef = useRef<View | null>(null);
   const canvasOriginRef = useRef({ x: 0, y: 0 });
+  /** 画布缩放/平移状态（非框选模式下可用双指缩放、单指拖动查看图片） */
+  const [canvasZoom, setCanvasZoom] = useState(1);
+  const [canvasPan, setCanvasPan] = useState({ x: 0, y: 0 });
+  const canvasZoomRef = useRef(1);
+  const canvasPanRef = useRef({ x: 0, y: 0 });
+  const lastPinchDistRef = useRef(0);
+  const panStartRef = useRef<{ x: number; y: number } | null>(null);
   const chatListRef = useRef<FlatList<Message> | null>(null);
   // 追踪用户是否在列表底部附近（决定新消息是否自动滚动）
   const isNearBottomRef = useRef(true);
@@ -115,6 +122,52 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       x: evt.nativeEvent.pageX - canvasOriginRef.current.x,
       y: evt.nativeEvent.pageY - canvasOriginRef.current.y,
     };
+  }
+  // ---- 画布双指缩放 + 单指拖动 ----
+  function handleCanvasTouchStart(e: any) {
+    const touches = e.nativeEvent.touches;
+    if (touches.length === 2) {
+      const t0 = touches[0], t1 = touches[1];
+      lastPinchDistRef.current = Math.sqrt((t0.pageX - t1.pageX) ** 2 + (t0.pageY - t1.pageY) ** 2);
+    } else if (touches.length === 1 && canvasZoom > 1) {
+      const p = canvasPoint(e);
+      panStartRef.current = { x: p.x - canvasPanRef.current.x, y: p.y - canvasPanRef.current.y };
+    }
+  }
+  function handleCanvasTouchMove(e: any) {
+    const touches = e.nativeEvent.touches;
+    if (touches.length === 2 && selectMode == null) {
+      const t0 = touches[0], t1 = touches[1];
+      const dist = Math.sqrt((t0.pageX - t1.pageX) ** 2 + (t0.pageY - t1.pageY) ** 2);
+      const prev = lastPinchDistRef.current;
+      if (prev === 0) { lastPinchDistRef.current = dist; return; }
+      const ratio = dist / prev;
+      const newZoom = Math.min(5, Math.max(1, canvasZoomRef.current * ratio));
+      // 以触摸中心为基准计算平移偏移
+      const cx = (t0.pageX + t1.pageX) / 2 - canvasOriginRef.current.x;
+      const cy = (t0.pageY + t1.pageY) / 2 - canvasOriginRef.current.y;
+      const dRatio = newZoom / canvasZoomRef.current;
+      const newPanX = canvasPanRef.current.x - (cx - canvasSize.w / 2) * (dRatio - 1);
+      const newPanY = canvasPanRef.current.y - (cy - canvasSize.h / 2) * (dRatio - 1);
+      setCanvasZoom(newZoom); canvasZoomRef.current = newZoom;
+      setCanvasPan({ x: newPanX, y: newPanY }); canvasPanRef.current = { x: newPanX, y: newPanY };
+      lastPinchDistRef.current = dist;
+    } else if (touches.length === 1 && canvasZoomRef.current > 1 && selectMode == null) {
+      const start = panStartRef.current;
+      if (!start) return;
+      const p = canvasPoint(e);
+      const nx = p.x - start.x;
+      const ny = p.y - start.y;
+      setCanvasPan({ x: nx, y: ny }); canvasPanRef.current = { x: nx, y: ny };
+    }
+  }
+  function handleCanvasTouchEnd() {
+    lastPinchDistRef.current = 0;
+    panStartRef.current = null;
+  }
+  function resetCanvasZoom() {
+    setCanvasZoom(1); canvasZoomRef.current = 1;
+    setCanvasPan({ x: 0, y: 0 }); canvasPanRef.current = { x: 0, y: 0 };
   }
   const [dragRect, setDragRectState] = useState<DragRect | null>(null);
   const dragRectRef = useRef<DragRect | null>(null);
@@ -1088,27 +1141,40 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           setCanvasSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height });
           canvasWrapRef.current?.measureInWindow((x, y) => { canvasOriginRef.current = { x, y }; });
         }}
+        onTouchStart={handleCanvasTouchStart}
+        onTouchMove={handleCanvasTouchMove}
+        onTouchEnd={handleCanvasTouchEnd}
         {...panResponder.panHandlers}
       >
-        {currentImage ? (
-          <Pressable
-            style={imageDisplay
-              ? { position: 'absolute', left: imageDisplay.left, top: imageDisplay.top, width: imageDisplay.w, height: imageDisplay.h }
-              : styles.canvasImage}
-            disabled={Boolean(selectMode)}
-          >
-            <Image
-              source={imageSource(currentImage.url, 1280)}
-              style={{ width: '100%', height: '100%' }}
-              resizeMode={imageDisplay ? 'stretch' : 'contain'}
-            />
+        {/* 缩放/平移变换层 */}
+        <View style={{ flex: 1, transform: canvasZoom > 1 || (canvasPan.x !== 0 || canvasPan.y !== 0)
+          ? [{ translateX: canvasPan.x }, { translateY: canvasPan.y }, { scale: canvasZoom }] : undefined }}>
+          {currentImage ? (
+            <Pressable
+              style={imageDisplay
+                ? { position: 'absolute', left: imageDisplay.left, top: imageDisplay.top, width: imageDisplay.w, height: imageDisplay.h }
+                : styles.canvasImage}
+              disabled={Boolean(selectMode)}
+            >
+              <Image
+                source={imageSource(currentImage.url, 1280)}
+                style={{ width: '100%', height: '100%' }}
+                resizeMode={imageDisplay ? 'stretch' : 'contain'}
+              />
+            </Pressable>
+          ) : (
+            <Pressable style={styles.canvasEmpty} onPress={pickImage}>
+              <Icon name="image" size={48} color={colors.border} />
+              <Text style={styles.canvasEmptyText}>点击上传图片开始创作</Text>
+            </Pressable>
+          )}
+        </View>
+        {/* 缩放重置按钮 */}
+        {canvasZoom > 1 ? (
+          <Pressable onPress={resetCanvasZoom} style={styles.zoomResetBtn}>
+            <Text style={styles.zoomResetText}>重置视图</Text>
           </Pressable>
-        ) : (
-          <Pressable style={styles.canvasEmpty} onPress={pickImage}>
-            <Icon name="image" size={48} color={colors.border} />
-            <Text style={styles.canvasEmptyText}>点击上传图片开始创作</Text>
-          </Pressable>
-        )}
+        ) : null}
 
         {renderCanvasMask()}
 
@@ -1767,6 +1833,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     topbarTitle: { flex: 1, textAlign: 'center', fontSize: fontSize.md, fontWeight: '700', color: c.text, marginHorizontal: spacing.sm },
     canvasArea: { flex: 1, backgroundColor: c.canvasBg, overflow: 'hidden' },
     canvasWrap: { flex: 1, alignSelf: 'stretch' },
+    zoomResetBtn: { position: 'absolute', top: spacing.md, right: spacing.md, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.pill, backgroundColor: 'rgba(0,0,0,0.6)' },
+    zoomResetText: { color: '#fff', fontSize: fontSize.sm },
     canvasImage: { width: '100%', height: '100%' },
     canvasEmpty: { alignItems: 'center', justifyContent: 'center', flex: 1, alignSelf: 'stretch' },
     canvasEmptyText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted, textAlign: 'center', paddingHorizontal: spacing.xl },

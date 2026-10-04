@@ -5,7 +5,6 @@ import {
   Modal,
   PanResponder,
   Pressable,
-  ScrollView,
   StyleSheet,
   Text,
   TouchableWithoutFeedback,
@@ -41,16 +40,6 @@ const MIN_PERCENT = 2;
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 5;
 
-/** 裁剪比例预设 */
-const RATIO_PRESETS = [
-  { label: '自由', value: null },
-  { label: '1:1', value: 1 },
-  { label: '3:4', value: 3 / 4 },
-  { label: '4:3', value: 4 / 3 },
-  { label: '9:16', value: 9 / 16 },
-  { label: '16:9', value: 16 / 9 },
-] as const;
-
 /**
  * 上传裁剪：与工作台「局部」框选同款交互——
  * 在图片上拖拽画出选区（松手保持，可重新拖拽改选），确认后按选区裁剪导入。
@@ -67,8 +56,6 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
   const [dragRect, setDragRect] = useState<DragRect | null>(null);
   const [busy, setBusy] = useState(false);
   const [normalizing, setNormalizing] = useState(false);
-  /** 当前选中的裁剪比例（null = 自由） */
-  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
   /** 双指缩放进行中标记（防止 PanResponder 同时画选区） */
   const isPinchingRef = useRef(false);
   // 烘焙 EXIF 后的 uri（已旋转到正确方向，后续显示和裁剪都基于它）
@@ -221,17 +208,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
           const right = Math.min(d.x + d.w, Math.max(start.x, px));
           const top = Math.max(d.y, Math.min(start.y, py));
           const bottom = Math.min(d.y + d.h, Math.max(start.y, py));
-          let width = right - left;
-          let height = bottom - top;
-          // 比例锁定：以较小维度为准，计算另一维度
-          if (aspectRatio) {
-            if (width / aspectRatio < height) {
-              height = width / aspectRatio;
-            } else {
-              width = height * aspectRatio;
-            }
-          }
-          setDragRect({ x: left, y: top, width, height });
+          setDragRect({ x: left, y: top, width: right - left, height: bottom - top });
         },
         onPanResponderRelease: () => { dragStartRef.current = null; },
       }),
@@ -299,21 +276,6 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
           <Text style={styles.headerTitle}>裁剪图片</Text>
           <View style={{ width: 44 }} />
         </View>
-
-        {/* 比例预设选择条 */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.ratioBar} contentContainerStyle={styles.ratioList}>
-          {RATIO_PRESETS.map((preset) => (
-            <Pressable
-              key={preset.label}
-              style={[styles.ratioBtn, aspectRatio === preset.value && styles.ratioBtnActive]}
-              onPress={() => { setAspectRatio(preset.value); setDragRect(null); }}
-            >
-              <Text style={[styles.ratioText, aspectRatio === preset.value && styles.ratioTextActive]}>
-                {preset.label}
-              </Text>
-            </Pressable>
-          ))}
-        </ScrollView>
 
         <View style={styles.canvas}>
           <View ref={containerRef} style={styles.canvasInner} onLayout={handleLayout} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} {...pan.panHandlers}>
@@ -524,21 +486,4 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
       justifyContent: 'center',
     },
     zoomText: { color: '#fff', fontSize: 16, fontWeight: '600' },
-    ratioBar: { maxHeight: 40 },
-    ratioList: { paddingHorizontal: spacing.sm },
-    ratioBtn: {
-      paddingHorizontal: spacing.md,
-      paddingVertical: spacing.xs,
-      borderRadius: radius.md,
-      marginRight: spacing.sm,
-      borderWidth: 1,
-      borderColor: 'rgba(255,255,255,0.3)',
-      backgroundColor: 'rgba(255,255,255,0.08)',
-    },
-    ratioBtnActive: {
-      backgroundColor: c.accent,
-      borderColor: c.accent,
-    },
-    ratioText: { color: 'rgba(255,255,255,0.7)', fontSize: fontSize.sm, fontWeight: '500' },
-    ratioTextActive: { color: '#fff', fontWeight: '600' },
   });
