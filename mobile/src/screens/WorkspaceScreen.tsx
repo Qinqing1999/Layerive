@@ -136,7 +136,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }
   function handleCanvasTouchMove(e: any) {
     const touches = e.nativeEvent.touches;
-    if (touches.length === 2 && selectMode == null) {
+    if (touches.length === 2) {
       const t0 = touches[0], t1 = touches[1];
       const dist = Math.sqrt((t0.pageX - t1.pageX) ** 2 + (t0.pageY - t1.pageY) ** 2);
       const prev = lastPinchDistRef.current;
@@ -152,7 +152,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       setCanvasZoom(newZoom); canvasZoomRef.current = newZoom;
       setCanvasPan({ x: newPanX, y: newPanY }); canvasPanRef.current = { x: newPanX, y: newPanY };
       lastPinchDistRef.current = dist;
-    } else if (touches.length === 1 && canvasZoomRef.current > 1 && selectMode == null) {
+    } else if (touches.length === 1 && canvasZoomRef.current > 1) {
       const start = panStartRef.current;
       if (!start) return;
       const p = canvasPoint(e);
@@ -1141,10 +1141,9 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           setCanvasSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height });
           canvasWrapRef.current?.measureInWindow((x, y) => { canvasOriginRef.current = { x, y }; });
         }}
-        onTouchStart={handleCanvasTouchStart}
-        onTouchMove={handleCanvasTouchMove}
-        onTouchEnd={handleCanvasTouchEnd}
-        {...panResponder.panHandlers}
+        {...(selectMode
+          ? { ...panResponder.panHandlers }
+          : { onTouchStart: handleCanvasTouchStart, onTouchMove: handleCanvasTouchMove, onTouchEnd: handleCanvasTouchEnd })}
       >
         {/* 缩放/平移变换层 */}
         <View style={{ flex: 1, transform: canvasZoom > 1 || (canvasPan.x !== 0 || canvasPan.y !== 0)
