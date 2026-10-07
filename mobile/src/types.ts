@@ -5,7 +5,7 @@ export const API_BASE = __DEV__
   ? Platform.OS === 'android'
     ? 'http://10.0.2.2:8788'  // Android 模拟器
     : 'http://127.0.0.1:8788'  // iOS 模拟器 / 物理设备
-  : 'http://127.0.0.1:8788'; // 生产环境默认本机，用户可在设置页修改
+  : 'http://117.72.162.240:8788'; // 生产默认远程服务器（与 H5 同一数据源），可在设置页修改
 
 // Shared types (from web version)
 export type ModelConfig = {

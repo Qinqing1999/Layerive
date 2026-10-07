@@ -1109,6 +1109,16 @@ async function prepareLocalEdit(projectId, taskId, sourceImage, localEdit, signa
   return { image, prompt, source };
 }
 
+const OUTPAINT_DIRECTION_TEXT = {
+  all: '向四周自然补全画面（四个方向均扩展）',
+  horizontal: '向左右两侧均匀扩展画面',
+  vertical: '向上下两侧均匀扩展画面',
+  left: '仅向左侧扩展画面，其余边缘保持原图边界',
+  right: '仅向右侧扩展画面，其余边缘保持原图边界',
+  up: '仅向上方扩展画面，其余边缘保持原图边界',
+  down: '仅向下方扩展画面，其余边缘保持原图边界',
+};
+
 async function outpaintImage(projectId, input) {
   projectOrThrow(projectId);
   const image = imageOrThrow(projectId, input.imageId);
@@ -1116,8 +1126,11 @@ async function outpaintImage(projectId, input) {
   if (!/^\d{2,4}x\d{2,4}$/.test(size)) throw Object.assign(new Error('请选择有效的扩图目标尺寸'), { status: 400 });
   const [width, height] = size.split('x').map(Number);
   if (width < 256 || height < 256 || width > 4096 || height > 4096) throw Object.assign(new Error('扩图目标尺寸不在允许范围内'), { status: 400 });
-  const direction = width / height > (image.width || width) / (image.height || height) ? '向左右扩展画面' : width / height < (image.width || width) / (image.height || height) ? '向上下扩展画面' : '向四周自然补全画面';
-  const prompt = `以输入图片为核心，${direction}，将最终画布扩展为 ${size}。必须完整保留原图中已有的人物、主体、文字、物体、构图、细节、风格、光影与颜色，不得裁切、重绘或改变原图内容；仅在新增的画布区域自然延展背景、场景、纹理和必要元素，使边缘无缝衔接、透视与光线一致。不要添加不相关的新主体、文字、水印或边框。`;
+  // 方向由前端指定；未指定时按目标/原图宽高比自动判断（保持兼容）
+  const direction = OUTPAINT_DIRECTION_TEXT[input.direction]
+    || (width / height > (image.width || width) / (image.height || height) ? '向左右扩展画面' : width / height < (image.width || width) / (image.height || height) ? '向上下扩展画面' : '向四周自然补全画面');
+  const instruction = String(input.instruction || '').trim().replace(/\s+/g, ' ').slice(0, 500);
+  const prompt = `以输入图片为核心，${direction}，将最终画布扩展为 ${size}。必须完整保留原图中已有的人物、主体、文字、物体、构图、细节、风格、光影与颜色，不得裁切、重绘或改变原图内容；仅在新增的画布区域自然延展背景、场景、纹理和必要元素，使边缘无缝衔接、透视与光线一致。${instruction ? `用户新增区域的内容要求：${instruction}。` : ''}不要添加不相关的新主体、文字、水印或边框。`;
   return startGeneration(projectId, { prompt, operation: 'outpaint', modelId: input.modelId, inputImageId: image.id, parentVersionId: input.parentVersionId || image.version_id || null, params: { ...(input.params || {}), size } });
 }
 
@@ -1355,6 +1368,10 @@ function startGeneration(projectId, input, localEdit = null, textEdit = null) {
     throw Object.assign(new Error('当前模型不支持这个操作'), { status: 400 });
   }
   const params = { ...model.defaultParams, ...(input.params || {}) };
+  // 尺寸档位由前端下发（原比例映射/预设/自定义比例映射），服务端只校验格式不写死
+  if (params.size !== undefined && params.size !== null && !/^\d{2,5}x\d{2,5}$/.test(String(params.size))) {
+    throw Object.assign(new Error('图片尺寸参数格式不正确（应为 宽x高，如 2048x2048）'), { status: 400 });
+  }
   params.count = requestedImageCount(params);
   // Only the general /generate route opts into automatic multi-image intent
   // planning. Specialized edit operations keep their existing batch meaning.

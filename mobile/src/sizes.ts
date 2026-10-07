@@ -48,6 +48,35 @@ export function closestSizeForDimensions(provider: string | undefined, width?: n
 
 export type OutpaintPreset = { size: string; label: string; original?: boolean };
 
+/** 无参考图时的默认档位（1:1） */
+export function defaultSquareSize(provider: string | undefined): string {
+  const sizes = sizesForProvider(provider);
+  return sizes.find((option) => option.ratio === '1:1')?.value || sizes[0].value;
+}
+
+/** 任意比例（宽/高数值）→ 最接近的受支持档位尺寸（providers 只接受固定档位） */
+export function sizeForRatio(provider: string | undefined, ratioW: number, ratioH: number): string {
+  const sizes = sizesForProvider(provider);
+  if (!ratioW || !ratioH || ratioW <= 0 || ratioH <= 0) return defaultSquareSize(provider);
+  const ratio = ratioW / ratioH;
+  return sizes.reduce((closest, option) =>
+    logRatioGap(optionRatio(option), ratio) < logRatioGap(optionRatio(closest), ratio) ? option : closest).value;
+}
+
+/** 主生成比例选项：原比例（有参考图时，映射到最接近档位）+ 主流预设；
+ *  每项携带实际下发到服务端的 size，比例参数由前端决定，服务端不再写死 */
+export function generationRatioOptions(provider: string | undefined, width?: number | null, height?: number | null): { key: string; label: string; size: string }[] {
+  const options: { key: string; label: string; size: string }[] = [];
+  if (width && height && width > 0 && height > 0) {
+    options.push({ key: 'original', label: '原比例', size: closestSizeForDimensions(provider, width, height) });
+  }
+  for (const ratio of MAINSTREAM_RATIOS) {
+    const [w, h] = ratio.split(':').map(Number);
+    options.push({ key: ratio, label: ratio, size: sizeForRatio(provider, w, h) });
+  }
+  return options;
+}
+
 // Outpaint presets: the original image ratio first (mapped to the closest
 // supported size), then mainstream ratios deduplicated by mapped size.
 export function outpaintPresets(provider: string | undefined, width?: number | null, height?: number | null): OutpaintPreset[] {

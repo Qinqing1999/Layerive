@@ -10,13 +10,15 @@ type Props = {
   projectId: string;
   image: ProjectImage;
   visionModelId: string;
+  /** 生成尺寸档位（原图比例映射），保证改字输出与原图同比例 */
+  size?: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onSubmitted: (taskId: string, editInput: Record<string, unknown>) => void;
   onCancel: () => void;
 };
 
 /** Recognized-text editor: load segments, edit / delete / add, then submit edit-text task. */
-export function EditTextModal({ projectId, image, visionModelId, notify, onSubmitted, onCancel }: Props) {
+export function EditTextModal({ projectId, image, visionModelId, size, notify, onSubmitted, onCancel }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [loading, setLoading] = useState(true);
@@ -85,7 +87,7 @@ export function EditTextModal({ projectId, image, visionModelId, notify, onSubmi
     if (!changed.length) { notify('请先修改、删除或新增至少一段文字', 'error'); return; }
     setSubmitting(true);
     try {
-      const editInput = {
+      const editInput: Record<string, unknown> = {
         imageId: image.id,
         visionModelId,
         segments: changed.map((seg) => ({
@@ -96,6 +98,7 @@ export function EditTextModal({ projectId, image, visionModelId, notify, onSubmi
           rect: seg.rect || null,
         })),
       };
+      if (size) editInput.params = { size };
       const result = await api.editText(projectId, editInput);
       onSubmitted(result.taskId, editInput);
     } catch (e) {

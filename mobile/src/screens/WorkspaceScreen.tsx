@@ -27,10 +27,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } from '../api';
 import { TASK_OPERATION_LABELS, formatTaskTime } from '../labels';
-import { outpaintPresets } from '../sizes';
+import { closestSizeForDimensions, defaultSquareSize, sizeForRatio, generationRatioOptions } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
-import type { GenerateResult, GenerationTask, Message, ModelConfig, ProjectBundle, ProjectImage, Version } from '../types';
+import type { GenerateResult, GenerationTask, LocalEditReference, Message, ModelConfig, ProjectBundle, ProjectImage, Version } from '../types';
 import { Icon } from '../components/Icon';
 import { CropView } from '../components/CropView';
 import { ModalSheet } from '../components/ModalSheet';
@@ -81,7 +81,17 @@ const STAGE_LABELS: Record<string, string> = {
   preserving: '还原框外像素…',
 };
 
-const OUTPAINT_HINT = '原图比例优先（向四周自然补全），也可选择主流画布比例';
+const OUTPAINT_HINT = '选择扩展方向与目标画布尺寸，新增区域仅延展背景，原图内容保持不变';
+
+const OUTPAINT_DIRECTIONS: { key: string; label: string }[] = [
+  { key: 'all', label: '四周' },
+  { key: 'horizontal', label: '左右' },
+  { key: 'vertical', label: '上下' },
+  { key: 'left', label: '向左' },
+  { key: 'right', label: '向右' },
+  { key: 'up', label: '向上' },
+  { key: 'down', label: '向下' },
+];
 
 const SELECT_HINTS: Record<'localEdit' | 'extract', string> = {
   localEdit: '在图片上拖拽框选要修改的区域',
@@ -100,6 +110,18 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const insets = useSafeAreaInsets();
   const [preview, setPreview] = useState<{ image: ProjectImage; message?: Message } | null>(null);
   const [count, setCount] = useState(1);
+  /** 生成比例：'original' 原比例（默认）| 主流预设 key | 'custom' 自定义；实际档位由前端映射后下发 */
+  const [ratioKey, setRatioKey] = useState<string>('original');
+  const [customRatioText, setCustomRatioText] = useState('16:9');
+  const [customRatioOpen, setCustomRatioOpen] = useState(false);
+  const [customDraft, setCustomDraft] = useState({ w: '16', h: '9' });
+  /** 扩图：目标尺寸（null=未初始化，打开 sheet 时按原图比例预置）/ 自定义尺寸 / 扩展方向 / 新增区域内容描述 */
+  const [outpaintSize, setOutpaintSize] = useState<string | null>(null);
+  const [outpaintCustom, setOutpaintCustom] = useState(false);
+  const [outpaintCustomW, setOutpaintCustomW] = useState('');
+  const [outpaintCustomH, setOutpaintCustomH] = useState('');
+  const [outpaintDir, setOutpaintDir] = useState('all');
+  const [outpaintInstruction, setOutpaintInstruction] = useState('');
   const [uploading, setUploading] = useState(false);
   const [cropAsset, setCropAsset] = useState<{ uri: string; data: string; mimeType: string; name: string; use: 'upload' | 'reference'; rotation: number } | null>(null);
   const [parentVersionId, setParentVersionId] = useState<string | null>(null);
@@ -580,13 +602,35 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     runTracked(entry.submit).catch((e) => notify((e as Error).message, 'error'));
   }
 
+  /** 主生成比例选项（原比例优先）与实际下发档位：比例决策在前端，服务端只校验不写死 */
+  const ratioOptions = useMemo(
+    () => generationRatioOptions(imageModel?.provider, currentImage?.width, currentImage?.height),
+    [imageModel?.provider, currentImage?.width, currentImage?.height]
+  );
+  const genSize = useMemo(() => {
+    const provider = imageModel?.provider;
+    if (ratioKey === 'custom') {
+      const [w, h] = customRatioText.split(':').map(Number);
+      return sizeForRatio(provider, w, h);
+    }
+    if (ratioKey === 'original') {
+      return currentImage
+        ? closestSizeForDimensions(provider, currentImage.width, currentImage.height)
+        : defaultSquareSize(provider);
+    }
+    return ratioOptions.find((option) => option.key === ratioKey)?.size || defaultSquareSize(provider);
+  }, [ratioKey, customRatioText, ratioOptions, imageModel?.provider, currentImage]);
+  const genSizeLabel = ratioKey === 'custom'
+    ? (customRatioText || '自定义')
+    : (ratioKey === 'original' && !currentImage ? '默认' : (ratioOptions.find((option) => option.key === ratioKey)?.label ?? '原比例'));
+
   async function submitGenerate() {
     if (!prompt.trim() || activeTask || submittingRef.current) return;
     submittingRef.current = true;
     // 提交前固化输入，失败重试时沿用当时的画布图与父版本
     const input: Record<string, unknown> = {
       prompt: prompt.trim(),
-      params: { count },
+      params: { count, size: genSize },
       visionModelId: activeVisionModel,
     };
     if (currentImage) input.imageId = currentImage.id;
@@ -642,8 +686,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       watermark: '视觉模型将先判断并定位水印，再由图片模型修复遮挡区域。继续？',
     } as const;
     const ops = {
-      enhance: () => api.enhance(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel }),
-      watermark: () => api.removeWatermark(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel }),
+      enhance: () => api.enhance(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel, params: { size: originalImageSize() } }),
+      watermark: () => api.removeWatermark(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel, params: { size: originalImageSize() } }),
     } as const;
     Alert.alert(kind === 'enhance' ? '图片变清晰' : '去水印', tips[kind], [
       { text: '取消', style: 'cancel' },
@@ -659,13 +703,44 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     ]);
   }
 
-  async function submitOutpaint(size: string) {
+  /** 原图比例映射的生成档位：改字/局部/清晰/去水印等必须忠于原图比例的操作使用 */
+  function originalImageSize(): string | undefined {
+    if (!currentImage) return undefined;
+    return closestSizeForDimensions(imageModel?.provider, currentImage.width, currentImage.height);
+  }
+
+  /** 打开扩图 sheet：目标尺寸预置为原图比例的最近档位 */
+  function openOutpaint() {
     if (!currentImage) return;
-    const imageId = currentImage.id;
+    setOutpaintSize(closestSizeForDimensions(imageModel?.provider, currentImage.width, currentImage.height));
+    setOutpaintCustom(false);
+    setOutpaintCustomW('');
+    setOutpaintCustomH('');
+    setOutpaintDir('all');
+    setOutpaintInstruction('');
+    setSheet('outpaint');
+  }
+
+  /** 当前生效的扩图目标尺寸：自定义模式下校验范围，无效返回 null */
+  function effectiveOutpaintSize(): string | null {
+    if (outpaintCustom) {
+      const w = Number(outpaintCustomW), h = Number(outpaintCustomH);
+      if (!w || !h || w < 256 || h < 256 || w > 4096 || h > 4096) return null;
+      return `${Math.round(w)}x${Math.round(h)}`;
+    }
+    return outpaintSize;
+  }
+
+  async function submitOutpaint() {
+    if (!currentImage) return;
+    const size = effectiveOutpaintSize();
+    if (!size) { notify('请选择或输入有效的目标尺寸（256–4096）', 'error'); return; }
+    const input: Record<string, unknown> = { imageId: currentImage.id, size, direction: outpaintDir, visionModelId: activeVisionModel };
+    if (outpaintInstruction.trim()) input.instruction = outpaintInstruction.trim();
     setSheet(null);
     try {
       setBottomTab('chat');
-      await runTracked(() => api.outpaint(projectId, { imageId, size, visionModelId: activeVisionModel }));
+      await runTracked(() => api.outpaint(projectId, input));
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
@@ -678,6 +753,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       rect: selectedRect,
       instruction: localInstruction.trim(),
       visionModelId: activeVisionModel,
+      params: { size: originalImageSize() },
     };
     if (localReference) input.reference = localReference;
     setSheet(null);
@@ -862,6 +938,29 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     } catch (e) {
       notify((e as Error).message, 'error');
     }
+  }
+
+  /** 画廊图片导入为项目图片并设为画布：上传后服务端自动将 currentImageId 指向新图 */
+  function handleGallerySetCanvas(asset: LocalEditReference) {
+    setSheet(null);
+    setUploading(true);
+    api.uploadImage(projectId, { data: asset.data, mimeType: asset.mimeType, name: asset.name || 'gallery-image.jpg' })
+      .then((result) => {
+        setBundle(result);
+        setParentVersionId(null);
+        setBottomTab('canvas');
+        notify('画廊图片已设为画布');
+      })
+      .catch((e: Error) => notify(e.message, 'error'))
+      .finally(() => setUploading(false));
+  }
+
+  /** 画廊图片设为局部修改参考图 */
+  function handleGalleryUseReference(asset: LocalEditReference) {
+    setLocalReference(asset);
+    setSheet(null);
+    setSelectMode(null);
+    notify('已设为参考图，可在「局部」修改中使用');
   }
 
   /** 旋转/翻转当前画布图片（本地处理，不上传新版本） */
@@ -1153,16 +1252,28 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       {/* 画布操作栏：上传 / 相机 / 保存（仅画布页显示） */}
       {bottomTab === 'canvas' && (
         <View style={styles.actionBar}>
+          {/* 生成参数：数量/比例（紧凑版），与对话页输入栏共享同一状态 */}
+          <CountSelect value={count} onChange={setCount} colors={colors} compact />
+          <RatioSelect
+            label={genSizeLabel}
+            options={ratioOptions}
+            value={ratioKey}
+            customText={customRatioText}
+            onSelect={setRatioKey}
+            onCustom={() => { setCustomDraft({ w: '16', h: '9' }); setCustomRatioOpen(true); }}
+            colors={colors}
+            compact
+          />
           <Pressable onPress={pickImage} style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]} disabled={uploading}>
-            {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={16} color={colors.text} />}
+            {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={14} color={colors.text} />}
             <Text style={styles.actionText}>上传</Text>
           </Pressable>
           <Pressable onPress={pickCamera} style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]} disabled={uploading}>
-            <Icon name="camera" size={16} color={colors.text} />
+            <Icon name="camera" size={14} color={colors.text} />
             <Text style={styles.actionText}>拍照</Text>
           </Pressable>
           <Pressable onPress={() => void saveCurrentImage()} style={({ pressed }) => [styles.actionBtn, !currentImage && styles.actionBtnDisabled, pressed && { opacity: 0.7 }]} disabled={!currentImage}>
-            <Icon name="download" size={16} color={colors.text} />
+            <Icon name="download" size={14} color={colors.text} />
             <Text style={styles.actionText}>保存</Text>
           </Pressable>
         </View>
@@ -1257,7 +1368,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             <ToolBtn icon="text" label="改字" colors={colors} disabled={!currentImage} onPress={() => setSheet('editText')} />
             <ToolBtn icon="region" label="局部" colors={colors} active={selectMode === 'localEdit'} disabled={!currentImage} onPress={() => toggleSelectMode('localEdit')} />
             <ToolBtn icon="crop" label="提取" colors={colors} active={selectMode === 'extract'} disabled={!currentImage} onPress={() => toggleSelectMode('extract')} />
-            <ToolBtn icon="expand" label="扩图" colors={colors} disabled={!currentImage} onPress={() => setSheet('outpaint')} />
+            <ToolBtn icon="expand" label="扩图" colors={colors} disabled={!currentImage} onPress={openOutpaint} />
             <ToolBtn icon="enhance" label="清晰" colors={colors} disabled={!currentImage} onPress={() => runSpecial('enhance')} />
             <ToolBtn icon="droplet" label="去水印" colors={colors} disabled={!currentImage} onPress={() => runSpecial('watermark')} />
           </ScrollView>
@@ -1390,6 +1501,15 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           ) : null}
           <View style={styles.countRow}>
             <CountSelect value={count} onChange={setCount} colors={colors} />
+            <RatioSelect
+              label={genSizeLabel}
+              options={ratioOptions}
+              value={ratioKey}
+              customText={customRatioText}
+              onSelect={setRatioKey}
+              onCustom={() => { setCustomDraft({ w: '16', h: '9' }); setCustomRatioOpen(true); }}
+              colors={colors}
+            />
             <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
               <Icon name="batch" size={13} color={colors.accent} />
               <Text style={styles.batchPillText}>批量创作</Text>
@@ -1418,6 +1538,54 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         </View>
       </KeyboardAvoidingView>
       ) : null}
+
+      {/* 自定义比例弹窗：输入宽高比，实际下发映射后的最近档位尺寸（画布页/对话页共用） */}
+      <Modal transparent visible={customRatioOpen} animationType="fade" onRequestClose={() => setCustomRatioOpen(false)}>
+        <Pressable style={ratioModalStyles(colors).overlay} onPress={() => setCustomRatioOpen(false)}>
+          <Pressable style={[ratioModalStyles(colors).card, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <Text style={[ratioModalStyles(colors).title, { color: colors.text }]}>自定义比例</Text>
+            <View style={ratioModalStyles(colors).inputsRow}>
+              <TextInput
+                style={[ratioModalStyles(colors).input, { color: colors.text, borderColor: colors.border }]}
+                value={customDraft.w}
+                onChangeText={(t) => setCustomDraft((d) => ({ ...d, w: t.replace(/[^0-9]/g, '') }))}
+                keyboardType="number-pad"
+                placeholder="宽"
+                placeholderTextColor={colors.muted}
+              />
+              <Text style={[ratioModalStyles(colors).colon, { color: colors.muted }]}>:</Text>
+              <TextInput
+                style={[ratioModalStyles(colors).input, { color: colors.text, borderColor: colors.border }]}
+                value={customDraft.h}
+                onChangeText={(t) => setCustomDraft((d) => ({ ...d, h: t.replace(/[^0-9]/g, '') }))}
+                keyboardType="number-pad"
+                placeholder="高"
+                placeholderTextColor={colors.muted}
+              />
+            </View>
+            <Text style={[ratioModalStyles(colors).preview, { color: colors.muted }]}>
+              实际生成档位：{sizeForRatio(imageModel?.provider, Number(customDraft.w), Number(customDraft.h))}
+            </Text>
+            <View style={ratioModalStyles(colors).btnRow}>
+              <Pressable style={[ratioModalStyles(colors).btn, { borderColor: colors.border }]} onPress={() => setCustomRatioOpen(false)}>
+                <Text style={[ratioModalStyles(colors).btnText, { color: colors.textSecondary }]}>取消</Text>
+              </Pressable>
+              <Pressable
+                style={[ratioModalStyles(colors).btn, { backgroundColor: colors.accent, borderColor: colors.accent }]}
+                onPress={() => {
+                  const w = Number(customDraft.w), h = Number(customDraft.h);
+                  if (!w || !h || w <= 0 || h <= 0) { notify('请输入有效的宽高数值', 'error'); return; }
+                  setCustomRatioText(`${w}:${h}`);
+                  setRatioKey('custom');
+                  setCustomRatioOpen(false);
+                }}
+              >
+                <Text style={[ratioModalStyles(colors).btnText, { color: '#fff' }]}>确定</Text>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Sheets */}
       {/* 图片预览：消息图片与画布图片共用（大图 + 出处 + 保存/分享 + 设为画布） */}
@@ -1500,6 +1668,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             projectId={projectId}
             image={currentImage}
             visionModelId={activeVisionModel}
+            size={originalImageSize()}
             notify={notify}
             onSubmitted={(taskId, editInput) => {
               setSheet(null);
@@ -1544,6 +1713,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             setSheet(null);
             notify(stylePrompt ? '提示词已填入（风格提示词已忽略，可在提示词中补充）' : '提示词已填入');
           }}
+          onSetCanvas={handleGallerySetCanvas}
+          onUseReference={handleGalleryUseReference}
         />
       </ModalSheet>
 
@@ -1598,22 +1769,83 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         </View>
       </ModalSheet>
 
-      {/* Outpaint size sheet */}
-      <ModalSheet visible={sheet === 'outpaint'} title="扩图" onClose={() => setSheet(null)}>
+      {/* Outpaint sheet：方向 + 目标尺寸（预设/自定义）+ 新增区域描述 + 示意预览 */}
+      <ModalSheet
+        visible={sheet === 'outpaint'}
+        title="扩图"
+        onClose={() => setSheet(null)}
+        footer={
+          <Pressable style={styles.primaryBtn} onPress={submitOutpaint}>
+            <Text style={styles.primaryBtnText}>提交扩图</Text>
+          </Pressable>
+        }
+      >
         <View style={styles.padBody}>
           <Text style={styles.fieldLabel}>{OUTPAINT_HINT}</Text>
-          <View style={styles.sizeGrid}>
-            {outpaintPresets(imageModel?.provider, currentImage?.width, currentImage?.height).map((preset) => (
-              <Pressable
-                key={`${preset.label}-${preset.size}`}
-                style={[styles.sizeBtn, preset.original && styles.sizeBtnOriginal]}
-                onPress={() => submitOutpaint(preset.size)}
-              >
-                <Text style={[styles.sizeLabel, preset.original && styles.sizeBtnOriginalText]}>{preset.label}</Text>
-                <Text style={[styles.sizeValue, preset.original && styles.sizeBtnOriginalValue]}>{preset.size}</Text>
-              </Pressable>
-            ))}
+          <View>
+            <Text style={styles.fieldLabel}>扩展方向</Text>
+            <View style={styles.dirChipRow}>
+              {OUTPAINT_DIRECTIONS.map((d) => (
+                <Pressable key={d.key} style={[styles.dirChip, outpaintDir === d.key && styles.dirChipActive]} onPress={() => setOutpaintDir(d.key)}>
+                  <Text style={[styles.dirChipText, outpaintDir === d.key && styles.dirChipTextActive]}>{d.label}</Text>
+                </Pressable>
+              ))}
+            </View>
           </View>
+          <View>
+            <Text style={styles.fieldLabel}>目标画布尺寸</Text>
+            <View style={styles.dirChipRow}>
+              {/* 全量主流比例（不按尺寸去重），chip 上标注实际映射的档位 */}
+              {generationRatioOptions(imageModel?.provider, null, null).map((option) => (
+                <Pressable
+                  key={option.key}
+                  style={[styles.dirChip, !outpaintCustom && outpaintSize === option.size && styles.dirChipActive]}
+                  onPress={() => { setOutpaintSize(option.size); setOutpaintCustom(false); }}
+                >
+                  <Text style={[styles.dirChipText, !outpaintCustom && outpaintSize === option.size && styles.dirChipTextActive]}>
+                    {option.label} {option.size}
+                  </Text>
+                </Pressable>
+              ))}
+              <Pressable style={[styles.dirChip, outpaintCustom && styles.dirChipActive]} onPress={() => setOutpaintCustom(true)}>
+                <Text style={[styles.dirChipText, outpaintCustom && styles.dirChipTextActive]}>自定义</Text>
+              </Pressable>
+            </View>
+            {outpaintCustom ? (
+              <View style={styles.outpaintCustomRow}>
+                <TextInput
+                  style={styles.outpaintCustomInput}
+                  value={outpaintCustomW}
+                  onChangeText={(t) => setOutpaintCustomW(t.replace(/[^0-9]/g, ''))}
+                  keyboardType="number-pad"
+                  placeholder="宽"
+                  placeholderTextColor={colors.muted}
+                />
+                <Text style={{ color: colors.muted }}>×</Text>
+                <TextInput
+                  style={styles.outpaintCustomInput}
+                  value={outpaintCustomH}
+                  onChangeText={(t) => setOutpaintCustomH(t.replace(/[^0-9]/g, ''))}
+                  keyboardType="number-pad"
+                  placeholder="高"
+                  placeholderTextColor={colors.muted}
+                />
+                <Text style={styles.outpaintCustomHint}>256–4096</Text>
+              </View>
+            ) : null}
+          </View>
+          <View>
+            <Text style={styles.fieldLabel}>新增区域内容（可选）</Text>
+            <TextInput
+              style={styles.instructionInput}
+              value={outpaintInstruction}
+              onChangeText={setOutpaintInstruction}
+              placeholder="如：右侧延伸出一片星空下的森林，保持夜景氛围"
+              placeholderTextColor={colors.muted}
+              multiline
+            />
+          </View>
+          <OutpaintPreview image={currentImage} size={effectiveOutpaintSize()} direction={outpaintDir} colors={colors} />
         </View>
       </ModalSheet>
 
@@ -1676,13 +1908,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
 }
 
 /** 数量下拉选择：替代占宽的四枚按钮，节省输入栏空间 */
-function CountSelect({ value, onChange, colors }: { value: number; onChange: (n: number) => void; colors: ReturnType<typeof useTheme>['colors'] }) {
+function CountSelect({ value, onChange, colors, compact }: { value: number; onChange: (n: number) => void; colors: ReturnType<typeof useTheme>['colors']; compact?: boolean }) {
   const styles = countSelectStyles(colors);
   const [open, setOpen] = useState(false);
   return (
     <View>
       <Pressable style={styles.btn} onPress={() => setOpen(true)}>
-        <Text style={styles.text}>数量 ×{value}</Text>
+        <Text style={styles.text}>{compact ? `×${value}` : `数量 ×${value}`}</Text>
         <Icon name="chevronDown" size={13} color={colors.textSecondary} />
       </Pressable>
       <Modal transparent visible={open} animationType="fade" onRequestClose={() => setOpen(false)}>
@@ -1713,6 +1945,122 @@ const countSelectStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     menu: { width: 220, borderRadius: radius.md, borderWidth: 1, overflow: 'hidden' },
     item: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
     itemText: { fontSize: fontSize.sm },
+  });
+
+/** 生成比例下拉选择：原比例（默认）/ 主流预设 / 自定义；每项展示实际下发的档位尺寸 */
+function RatioSelect({ label, options, value, customText, onSelect, onCustom, colors, compact }: {
+  label: string;
+  options: { key: string; label: string; size: string }[];
+  value: string;
+  customText: string;
+  onSelect: (key: string) => void;
+  onCustom: () => void;
+  colors: ReturnType<typeof useTheme>['colors'];
+  compact?: boolean;
+}) {
+  const styles = countSelectStyles(colors);
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <Pressable style={styles.btn} onPress={() => setOpen(true)}>
+        <Text style={styles.text}>{compact ? label : `比例 ${label}`}</Text>
+        <Icon name="chevronDown" size={13} color={colors.textSecondary} />
+      </Pressable>
+      <Modal transparent visible={open} animationType="fade" onRequestClose={() => setOpen(false)}>
+        <Pressable style={styles.overlay} onPress={() => setOpen(false)}>
+          <View style={[styles.menu, { backgroundColor: colors.card, borderColor: colors.border }]}>
+            <ScrollView style={{ maxHeight: 420 }}>
+              {options.map((option) => (
+                <Pressable
+                  key={option.key}
+                  style={styles.item}
+                  onPress={() => { onSelect(option.key); setOpen(false); }}
+                >
+                  <Text style={[styles.itemText, { color: value === option.key ? colors.accent : colors.text }]}>{option.label}</Text>
+                  <Text style={{ fontSize: fontSize.xs, color: colors.muted }}>{option.size}</Text>
+                </Pressable>
+              ))}
+              <Pressable style={styles.item} onPress={() => { setOpen(false); onCustom(); }}>
+                <Text style={[styles.itemText, { color: value === 'custom' ? colors.accent : colors.text }]}>自定义比例…</Text>
+                {value === 'custom' && customText ? <Text style={{ fontSize: fontSize.xs, color: colors.muted }}>{customText}</Text> : null}
+              </Pressable>
+            </ScrollView>
+          </View>
+        </Pressable>
+      </Modal>
+    </View>
+  );
+}
+
+/** 扩图示意预览：虚线框为目标画布（按目标比例适配），原图按扩展方向摆放，空白高亮区即新增区域 */
+function OutpaintPreview({ image, size, direction, colors }: {
+  image: { url: string | null; width: number | null; height: number | null } | null;
+  size: string | null;
+  direction: string;
+  colors: ReturnType<typeof useTheme>['colors'];
+}) {
+  const styles = makeStyles(colors);
+  const [box, setBox] = useState({ w: 0, h: 0 });
+  const [tw, th] = (size || '0x0').split('x').map(Number);
+  const valid = tw > 0 && th > 0 && box.w > 0;
+  // 目标画布矩形：适配容器（高 120–210），水平居中
+  const maxH = Math.max(120, Math.min(210, box.h));
+  const ratio = tw / th;
+  let cw = box.w, ch = box.w / ratio;
+  if (ch > maxH) { ch = maxH; cw = maxH * ratio; }
+  const cx = (box.w - cw) / 2;
+  // 原图矩形（画布内坐标）：按方向贴边或居中，异常比例时退化为 contain
+  let ir: { left: number; top: number; width: number; height: number } | null = null;
+  if (image && image.width && image.height && cw > 0) {
+    const r = image.width / image.height;
+    let dw: number, dh: number;
+    if (direction === 'horizontal' || direction === 'left' || direction === 'right') {
+      dh = ch; dw = ch * r;
+      if (dw > cw) { dw = cw; dh = cw / r; }
+    } else if (direction === 'vertical' || direction === 'up' || direction === 'down') {
+      dw = cw; dh = cw / r;
+      if (dh > ch) { dh = ch; dw = ch * r; }
+    } else {
+      if (r > ratio) { dw = cw; dh = cw / r; } else { dh = ch; dw = ch * r; }
+    }
+    let left = (cw - dw) / 2, top = (ch - dh) / 2;
+    if (direction === 'left') left = cw - dw;
+    else if (direction === 'right') left = 0;
+    else if (direction === 'up') top = ch - dh;
+    else if (direction === 'down') top = 0;
+    ir = { left, top, width: dw, height: dh };
+  }
+  return (
+    <View style={{ height: maxH }} onLayout={(e) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
+      {valid ? (
+        <View style={[styles.outpaintCanvas, { left: cx, top: (box.h - ch) / 2, width: cw, height: ch }]}>
+          {ir && image ? (
+            <Image
+              source={imageSource(image.url, 480)}
+              style={{ position: 'absolute', left: ir.left, top: ir.top, width: ir.width, height: ir.height }}
+              resizeMode="stretch"
+            />
+          ) : null}
+          <Text style={styles.outpaintCanvasTag}>新增区域</Text>
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
+/** 自定义比例弹窗样式 */
+const ratioModalStyles = (c: ReturnType<typeof useTheme>['colors']) =>
+  StyleSheet.create({
+    overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
+    card: { width: 260, borderRadius: radius.md, borderWidth: 1, padding: spacing.md, gap: spacing.sm },
+    title: { fontSize: fontSize.md, fontWeight: '700' },
+    inputsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
+    input: { flex: 1, height: 40, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: spacing.sm, textAlign: 'center' },
+    colon: { fontSize: fontSize.md },
+    preview: { fontSize: fontSize.xs },
+    btnRow: { flexDirection: 'row', gap: spacing.sm },
+    btn: { flex: 1, height: 36, borderRadius: radius.sm, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
+    btnText: { fontSize: fontSize.sm },
   });
 
 
@@ -1945,8 +2293,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     saveBtn: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.sm, backgroundColor: c.accentLight, borderWidth: 1, borderColor: c.accent },
     saveBtnDisabled: { opacity: 0.5 },
     saveBtnText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
-    actionBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
-    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
+    actionBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: spacing.sm, paddingVertical: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
+    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
     actionBtnDisabled: { opacity: 0.4 },
     actionText: { fontSize: fontSize.xs, color: c.textSecondary, fontWeight: '500' },
     batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
@@ -1976,13 +2324,16 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     referenceThumb: { width: 48, height: 48, borderRadius: radius.sm, backgroundColor: c.muted },
     referenceText: { flex: 1, color: c.accent, fontSize: fontSize.sm },
     rectNote: { fontSize: fontSize.xs, color: c.muted },
-    sizeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
-    sizeBtn: { width: '47%', padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: c.accent, backgroundColor: c.accentLight, alignItems: 'center', gap: 2 },
-    sizeBtnOriginal: { backgroundColor: c.accent },
-    sizeBtnOriginalText: { color: '#fff' },
-    sizeBtnOriginalValue: { color: 'rgba(255,255,255,0.82)' },
-    sizeLabel: { fontSize: fontSize.md, fontWeight: '700', color: c.accent },
-    sizeValue: { fontSize: fontSize.xs, color: c.textSecondary },
+    dirChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.xs },
+    dirChip: { paddingHorizontal: spacing.sm, paddingVertical: 5, borderRadius: radius.pill, borderWidth: 1, borderColor: c.border, backgroundColor: c.card },
+    dirChipActive: { backgroundColor: c.accent, borderColor: c.accent },
+    dirChipText: { fontSize: fontSize.xs, color: c.textSecondary },
+    dirChipTextActive: { color: '#fff', fontWeight: '600' },
+    outpaintCustomRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.sm },
+    outpaintCustomInput: { width: 80, height: 40, borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, textAlign: 'center', fontSize: fontSize.md, color: c.text, backgroundColor: c.card },
+    outpaintCustomHint: { fontSize: fontSize.xs, color: c.muted },
+    outpaintCanvas: { position: 'absolute', borderWidth: 1.5, borderStyle: 'dashed', borderRadius: radius.sm, overflow: 'hidden', backgroundColor: c.accentLight, borderColor: c.accent },
+    outpaintCanvasTag: { position: 'absolute', top: 4, left: 4, fontSize: 10, fontWeight: '600', color: c.accent, backgroundColor: 'rgba(255,255,255,0.78)', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1, overflow: 'hidden' },
     primaryBtn: { height: 46, borderRadius: radius.md, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
     primaryBtnText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
     busyOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
