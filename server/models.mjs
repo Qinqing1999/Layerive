@@ -1,9 +1,16 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { CONFIG_ROOT, uid } from './db.mjs';
 
 const configPath = path.join(CONFIG_ROOT, 'models.json');
 mkdirSync(path.dirname(configPath), { recursive: true });
+
+/** 原子写入：先写临时文件再 rename，避免写入中途崩溃导致配置文件损坏 */
+function atomicWrite(file, content) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, content, 'utf8');
+  renameSync(tmp, file);
+}
 
 export function normalizeBaseUrl(value) {
   return String(value || '').trim().replace(/\/(?:images\/generations|images\/edits)\/?$/i, '').replace(/\/+$/, '');
@@ -86,7 +93,7 @@ export function readModels() {
 }
 
 export function writeModels(config) {
-  writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`, 'utf8');
+  atomicWrite(configPath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 export function publicModel(model) {

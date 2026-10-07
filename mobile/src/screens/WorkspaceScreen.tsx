@@ -11,6 +11,7 @@ import {
   Platform,
   Pressable,
   ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TextInput,
@@ -18,11 +19,14 @@ import {
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
+import { RemoteImage } from '../components/RemoteImage';
+import { ZoomableImage } from '../components/ZoomableImage';
 import * as Sharing from 'expo-sharing';
 import * as FileSystem from 'expo-file-system';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } from '../api';
+import { TASK_OPERATION_LABELS, formatTaskTime } from '../labels';
 import { outpaintPresets } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
@@ -55,11 +59,11 @@ type PercentRect = { x: number; y: number; width: number; height: number };
 /** 画布内拖拽产生的显示坐标矩形 */
 type DragRect = { x: number; y: number; width: number; height: number };
 
-/** 选区拖拽手柄类型：创建新框 / 整体移动 / 八方向调整 */
-type DragHandle = 'create' | 'move' | 'nw' | 'ne' | 'sw' | 'se' | 'n' | 's' | 'w' | 'e';
+/** 选区拖拽手柄类型：创建新框 / 整体移动 / 四角调整 */
+type DragHandle = 'create' | 'move' | 'nw' | 'ne' | 'sw' | 'se';
 
-/** 边缘检测容差（像素）：触摸点距选区边/角在此范围内视为拖拽手柄 */
-const HANDLE_TOLERANCE = 24;
+/** 角点触控热区（像素）：触摸点距框角在此范围内视为拖拽手柄（34px ≈ 11dp，保证手指能轻松点中） */
+const CORNER_TOL = 34;
 
 /** EXIF Orientation → 顺时针旋转角度（Android 裁剪不自动烘焙 EXIF，需显式旋转） */
 function exifRotation(asset: { exif?: Record<string, unknown> | null }): number {
@@ -123,18 +127,42 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       y: evt.nativeEvent.pageY - canvasOriginRef.current.y,
     };
   }
+  /** 框选手势专用：取框选触摸层的本地坐标（locationX/Y）。
+   *  触摸层与画框蒙版同处 wrap 坐标空间，天然同参照系——
+   *  不经过任何测量换算，从机制上排除状态栏/布局时序导致的坐标偏移 */
+  function overlayPoint(evt: { nativeEvent: { locationX: number; locationY: number } }) {
+    return { x: evt.nativeEvent.locationX, y: evt.nativeEvent.locationY };
+  }
+  /** 测量画布容器原点，对齐 pageX/pageY 参照系。
+   *  关键：非 edge-to-edge 时 measureInWindow 返回屏幕坐标（含状态栏高度），
+   *  而触摸 pageY 相对应用内容区（状态栏下方，不含状态栏）。
+   *  若不校正，所有计算出的触摸点会整体上移一个状态栏高度，
+   *  导致角点 hitTest 系统性失准（按角变移动/新建，按边反而能 resize）。 */
+  function measureCanvasOrigin(onDone?: () => void) {
+    canvasWrapRef.current?.measureInWindow((x, y) => {
+      const statusH = Platform.OS === 'android' ? (StatusBar.currentHeight ?? 0) : 0;
+      canvasOriginRef.current = { x, y: y - statusH };
+      onDone?.();
+    });
+  }
   // ---- 画布双指缩放 + 单指拖动 ----
   function handleCanvasTouchStart(e: any) {
+    // 每次触摸都刷新容器原点（含状态栏校正），避免布局变化后缓存过期
+    measureCanvasOrigin();
+    // 框选模式下禁用画布缩放/平移，避免与画框拖拽冲突
+    if (selectMode) return;
     const touches = e.nativeEvent.touches;
     if (touches.length === 2) {
       const t0 = touches[0], t1 = touches[1];
       lastPinchDistRef.current = Math.sqrt((t0.pageX - t1.pageX) ** 2 + (t0.pageY - t1.pageY) ** 2);
-    } else if (touches.length === 1 && canvasZoom > 1) {
+    } else if (touches.length === 1) {
       const p = canvasPoint(e);
       panStartRef.current = { x: p.x - canvasPanRef.current.x, y: p.y - canvasPanRef.current.y };
     }
   }
   function handleCanvasTouchMove(e: any) {
+    // 框选模式下禁用画布缩放/平移
+    if (selectMode) return;
     const touches = e.nativeEvent.touches;
     if (touches.length === 2) {
       const t0 = touches[0], t1 = touches[1];
@@ -142,7 +170,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       const prev = lastPinchDistRef.current;
       if (prev === 0) { lastPinchDistRef.current = dist; return; }
       const ratio = dist / prev;
-      const newZoom = Math.min(5, Math.max(1, canvasZoomRef.current * ratio));
+      const newZoom = Math.min(5, Math.max(0.3, canvasZoomRef.current * ratio));
       // 以触摸中心为基准计算平移偏移
       const cx = (t0.pageX + t1.pageX) / 2 - canvasOriginRef.current.x;
       const cy = (t0.pageY + t1.pageY) / 2 - canvasOriginRef.current.y;
@@ -152,7 +180,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       setCanvasZoom(newZoom); canvasZoomRef.current = newZoom;
       setCanvasPan({ x: newPanX, y: newPanY }); canvasPanRef.current = { x: newPanX, y: newPanY };
       lastPinchDistRef.current = dist;
-    } else if (touches.length === 1 && canvasZoomRef.current > 1) {
+    } else if (touches.length === 1) {
       const start = panStartRef.current;
       if (!start) return;
       const p = canvasPoint(e);
@@ -183,12 +211,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const [extractBusy, setExtractBusy] = useState(false);
   const [busyLabel, setBusyLabel] = useState('');
   /** 撤销/重做栈：记录本地变换（旋转/翻转）前的图片信息 */
-  const [undoStack, setUndoStack] = useState<{ imageId: string; url: string }[]>([]);
-  const [redoStack, setRedoStack] = useState<{ imageId: string; url: string }[]>([]);
+  const [undoStack, setUndoStack] = useState<{ imageId: string; versionId: string | null; url: string }[]>([]);
+  const [redoStack, setRedoStack] = useState<{ imageId: string; versionId: string | null; url: string }[]>([]);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
   /** 最近一次提交（按任务 ID 记录），任务失败时可原样重发 */
   const lastSubmitRef = useRef<{ taskId: string; submit: () => Promise<GenerateResult> } | null>(null);
+  /** 提交锁：防止 submitGenerate 在 activeTask 设置前被连点触发重复请求 */
+  const submittingRef = useRef(false);
   const [failedTask, setFailedTask] = useState<{ error: string | null; retryable: boolean } | null>(null);
   /** 草稿仅首次加载恢复，避免轮询刷新覆盖用户正在输入的内容 */
   const draftRestoredRef = useRef(false);
@@ -498,16 +528,26 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
 
   function useAsCurrent(image: ProjectImage) {
     if (!bundle) return;
+    const prevImageId = bundle.project.currentImageId;
     setBundle({ ...bundle, project: { ...bundle.project, currentImageId: image.id } });
-    void api.updateProject(projectId, { currentImageId: image.id }).catch(() => {});
+    api.updateProject(projectId, { currentImageId: image.id }).catch((e) => {
+      // 服务端失败：回滚本地状态，提示用户
+      setBundle((prev) => prev ? { ...prev, project: { ...prev.project, currentImageId: prevImageId } } : prev);
+      notify((e as Error).message, 'error');
+    });
   }
 
   /** Use a history version as the current canvas + next generation input. */
   function useVersion(version: Version) {
     const target = version.outputs.find((img) => img.id === version.selectedImageId) || version.outputs[0];
     if (!target || !bundle) { notify('该版本没有可用输出图片', 'error'); return; }
+    const prevImageId = bundle.project.currentImageId;
     setBundle({ ...bundle, project: { ...bundle.project, currentImageId: target.id } });
-    void api.updateProject(projectId, { currentImageId: target.id }).catch(() => {});
+    api.updateProject(projectId, { currentImageId: target.id }).catch((e) => {
+      // 服务端失败：回滚本地状态
+      setBundle((prev) => prev ? { ...prev, project: { ...prev.project, currentImageId: prevImageId } } : prev);
+      notify((e as Error).message, 'error');
+    });
     setParentVersionId(version.id);
     setSheet(null);
     notify(`已切换到 V${version.number}，可从此版本继续创作`);
@@ -541,7 +581,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   }
 
   async function submitGenerate() {
-    if (!prompt.trim() || activeTask) return;
+    if (!prompt.trim() || activeTask || submittingRef.current) return;
+    submittingRef.current = true;
     // 提交前固化输入，失败重试时沿用当时的画布图与父版本
     const input: Record<string, unknown> = {
       prompt: prompt.trim(),
@@ -556,6 +597,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       setParentVersionId(null);
     } catch (e) {
       notify((e as Error).message, 'error');
+    } finally {
+      submittingRef.current = false;
     }
   }
 
@@ -576,6 +619,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       setSelectMode(null);
       setDragRect(null);
     } else {
+      // 进入框选模式前重置画布缩放/平移，保证触摸坐标与 imageDisplay 一致
+      resetCanvasZoom();
       setSelectMode(mode);
       setDragRect(null);
     }
@@ -835,8 +880,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         : [{ flip: ImageManipulator.FlipType.Vertical }];
       const out = await ImageManipulator.manipulateAsync(uri, actions, { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG, base64: true });
       if (!out.base64) throw new Error('图片处理失败');
-      // 记录撤销栈
-      setUndoStack((prev) => [...prev, { imageId: currentImage.id, url: currentImage.url }]);
+      // 记录撤销栈（含 versionId，与服务端状态同步）
+      setUndoStack((prev) => [...prev, { imageId: currentImage.id, versionId: currentImage.versionId || null, url: currentImage.url }]);
       setRedoStack([]);
       const updated = await api.uploadImage(projectId, { data: out.base64, mimeType: 'image/jpeg', name: `transform-${Date.now()}.jpg` });
       setBundle(updated);
@@ -857,11 +902,11 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     setUndoStack((prev) => {
       if (!prev.length) return prev;
       const last = prev[prev.length - 1];
-      setRedoStack((r) => [...r, { imageId: last.imageId, url: last.url }]);
-      // 切换回上一张图
+      setRedoStack((r) => [...r, { imageId: last.imageId, versionId: last.versionId, url: last.url }]);
+      // 切换回上一张图（同时更新 currentVersionId，避免 loadBundle 后状态回退）
       if (bundle) {
-        setBundle({ ...bundle, project: { ...bundle.project, currentImageId: last.imageId } });
-        void api.updateProject(projectId, { currentImageId: last.imageId }).catch(() => {});
+        setBundle({ ...bundle, project: { ...bundle.project, currentImageId: last.imageId, currentVersionId: last.versionId } });
+        void api.updateProject(projectId, { currentImageId: last.imageId, currentVersionId: last.versionId }).catch(() => {});
       }
       return prev.slice(0, -1);
     });
@@ -872,10 +917,10 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     setRedoStack((prev) => {
       if (!prev.length) return prev;
       const last = prev[prev.length - 1];
-      setUndoStack((u) => [...u, { imageId: last.imageId, url: last.url }]);
+      setUndoStack((u) => [...u, { imageId: last.imageId, versionId: last.versionId, url: last.url }]);
       if (bundle) {
-        setBundle({ ...bundle, project: { ...bundle.project, currentImageId: last.imageId } });
-        void api.updateProject(projectId, { currentImageId: last.imageId }).catch(() => {});
+        setBundle({ ...bundle, project: { ...bundle.project, currentImageId: last.imageId, currentVersionId: last.versionId } });
+        void api.updateProject(projectId, { currentImageId: last.imageId, currentVersionId: last.versionId }).catch(() => {});
       }
       return prev.slice(0, -1);
     });
@@ -899,48 +944,46 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
 
   /** 判断触摸点落在已有选区的哪个手柄上 */
   function hitTest(p: { x: number; y: number }, rect: DragRect): DragHandle {
+    if (!rect || rect.width < 1 || rect.height < 1) return 'create';
     const { x, y, width, height } = rect;
     const left = x, right = x + width, top = y, bottom = y + height;
-    const nearLeft = Math.abs(p.x - left) <= HANDLE_TOLERANCE;
-    const nearRight = Math.abs(p.x - right) <= HANDLE_TOLERANCE;
-    const nearTop = Math.abs(p.y - top) <= HANDLE_TOLERANCE;
-    const nearBottom = Math.abs(p.y - bottom) <= HANDLE_TOLERANCE;
-    if (nearTop && nearLeft) return 'nw';
-    if (nearTop && nearRight) return 'ne';
-    if (nearBottom && nearLeft) return 'sw';
-    if (nearBottom && nearRight) return 'se';
-    if (nearTop) return 'n';
-    if (nearBottom) return 's';
-    if (nearLeft) return 'w';
-    if (nearRight) return 'e';
+    // 边角优先：热区 = min(36px, 边长的一半)，保证小框也能点到
+    const hit = Math.min(CORNER_TOL, Math.min(width, height) / 2);
+    if (Math.abs(p.x - left) <= hit && Math.abs(p.y - top) <= hit) return 'nw';
+    if (Math.abs(p.x - right) <= hit && Math.abs(p.y - top) <= hit) return 'ne';
+    if (Math.abs(p.x - left) <= hit && Math.abs(p.y - bottom) <= hit) return 'sw';
+    if (Math.abs(p.x - right) <= hit && Math.abs(p.y - bottom) <= hit) return 'se';
     // 在选区内部 → 整体移动
-    if (p.x > left && p.x < right && p.y > top && p.y < bottom) return 'move';
+    if (p.x >= left && p.x <= right && p.y >= top && p.y <= bottom) return 'move';
     return 'create';
   }
 
-  /** 夹紧到图片显示区域 */
+  /** 夹紧到图片显示区域，同时限制宽高不溢出、不小于最小值 */
   function clampRect(r: DragRect): DragRect {
     if (!imageDisplay) return r;
     const minSize = 20;
-    const left = Math.max(imageDisplay.left, Math.min(imageDisplay.left + imageDisplay.w - minSize, r.x));
-    const top = Math.max(imageDisplay.top, Math.min(imageDisplay.top + imageDisplay.h - minSize, r.y));
-    const right = Math.min(imageDisplay.left + imageDisplay.w, r.x + r.width);
-    const bottom = Math.min(imageDisplay.top + imageDisplay.h, r.y + r.height);
-    return { x: left, y: top, width: Math.max(minSize, right - left), height: Math.max(minSize, bottom - top) };
+    const maxX = imageDisplay.left + imageDisplay.w;
+    const maxY = imageDisplay.top + imageDisplay.h;
+    return {
+      x: Math.max(imageDisplay.left, Math.min(maxX - minSize, r.x)),
+      y: Math.max(imageDisplay.top, Math.min(maxY - minSize, r.y)),
+      width: Math.max(minSize, Math.min(maxX - r.x, r.width)),
+      height: Math.max(minSize, Math.min(maxY - r.y, r.height)),
+    };
   }
 
   const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => Boolean(selectMode),
-    onMoveShouldSetPanResponder: () => Boolean(selectMode),
+    // selectMode 下单指始终接管；双指不抢占，让画布的 touch handlers 处理缩放
+    onStartShouldSetPanResponder: (evt) => Boolean(selectMode) && evt.nativeEvent.touches.length < 2,
+    onPanResponderTerminationRequest: () => false,
     onPanResponderGrant: (evt) => {
       if (!selectMode || !imageDisplay) return;
-      const p = canvasPoint(evt);
-      // 判断触摸点落在已有选区的哪个位置（从 ref 读取，避免重建 PanResponder）
+      // 同步取本地坐标（locationX/Y），无测量、无异步、无参照系换算
+      const p = overlayPoint(evt);
       const cur = dragRectRef.current;
       const handle = cur ? hitTest(p, cur) : 'create';
       dragHandleRef.current = handle;
       rectBeforeDragRef.current = cur ? { ...cur } : null;
-      // 所有模式都需要记录起始点（move 依赖它计算位移，resize 依赖它判断方向）
       dragStartRef.current = p;
       if (handle === 'create') {
         setDragRect({ x: p.x, y: p.y, width: 0, height: 0 });
@@ -948,7 +991,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     },
     onPanResponderMove: (evt) => {
       if (!selectMode || !imageDisplay) return;
-      const p = canvasPoint(evt);
+      const p = overlayPoint(evt);
       const handle = dragHandleRef.current;
       const base = rectBeforeDragRef.current;
       if (handle === 'create') {
@@ -963,25 +1006,35 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         const dx = p.x - (dragStartRef.current?.x ?? p.x);
         const dy = p.y - (dragStartRef.current?.y ?? p.y);
         setDragRect(clampRect({ x: base.x + dx, y: base.y + dy, width: base.width, height: base.height }));
-      } else if (base && (handle === 'nw' || handle === 'ne' || handle === 'sw' || handle === 'se' || handle === 'n' || handle === 's' || handle === 'w' || handle === 'e')) {
-        let { x, y, width, height } = base;
-        if (handle.includes('n')) {
-          const newY = Math.max(imageDisplay.top, Math.min(base.y + base.height - 20, p.y));
-          height += y - newY;
-          y = newY;
+      } else if (base && (handle === 'nw' || handle === 'ne' || handle === 'sw' || handle === 'se')) {
+        // 四角 resize：拖动的角 = 手指位置（精确跟手，放大/缩小都有效），对角固定不动。
+        // 新边夹在 [对角∓minSize, imageDisplay 边界] 内，保证不小于最小尺寸、不超出图片
+        const minSize = 20;
+        const dLeft = imageDisplay.left, dTop = imageDisplay.top;
+        const dRight = imageDisplay.left + imageDisplay.w, dBottom = imageDisplay.top + imageDisplay.h;
+        const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+        let newRect: DragRect;
+        if (handle === 'nw') {
+          const right = base.x + base.width, bottom = base.y + base.height;
+          const nx = clamp(p.x, dLeft, right - minSize);
+          const ny = clamp(p.y, dTop, bottom - minSize);
+          newRect = { x: nx, y: ny, width: right - nx, height: bottom - ny };
+        } else if (handle === 'ne') {
+          const bottom = base.y + base.height;
+          const nx = clamp(p.x, base.x + minSize, dRight);
+          const ny = clamp(p.y, dTop, bottom - minSize);
+          newRect = { x: base.x, y: ny, width: nx - base.x, height: bottom - ny };
+        } else if (handle === 'sw') {
+          const right = base.x + base.width;
+          const nx = clamp(p.x, dLeft, right - minSize);
+          const ny = clamp(p.y, base.y + minSize, dBottom);
+          newRect = { x: nx, y: base.y, width: right - nx, height: ny - base.y };
+        } else { // se
+          const nx = clamp(p.x, base.x + minSize, dRight);
+          const ny = clamp(p.y, base.y + minSize, dBottom);
+          newRect = { x: base.x, y: base.y, width: nx - base.x, height: ny - base.y };
         }
-        if (handle.includes('s')) {
-          height = Math.max(20, Math.min(imageDisplay.top + imageDisplay.h - y, p.y - y));
-        }
-        if (handle.includes('w')) {
-          const newX = Math.max(imageDisplay.left, Math.min(base.x + base.width - 20, p.x));
-          width += x - newX;
-          x = newX;
-        }
-        if (handle.includes('e')) {
-          width = Math.max(20, Math.min(imageDisplay.left + imageDisplay.w - x, p.x - x));
-        }
-        setDragRect(clampRect({ x, y, width, height }));
+        setDragRect(newRect);
       }
     },
     onPanResponderRelease: () => {
@@ -1012,38 +1065,33 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     if (!dragRect) setSelectedRect(null);
   }, [dragPercent, dragValid, dragRect, selectMode]);
 
-  /** 选区外蒙版：上 / 下 / 左 / 右四块半透明遮罩 + 四角拖拽手柄 + 四边中点手柄 */
+  /** 选区外蒙版：上 / 下 / 左 / 右四块半透明遮罩 + 四角拖拽手柄 */
   const renderCanvasMask = () => {
     if (!selectMode || !dragRect || !imageDisplay) return null;
     const { left: dLeft, top: dTop, w: dW, h: dH } = imageDisplay;
     const maskColor = 'rgba(0,0,0,0.55)';
-    const hs = 10; // 手柄边长的一半
+    const hs = 6; // 角点手柄半宽
     const corners = [
       { left: dragRect.x - hs, top: dragRect.y - hs },
       { left: dragRect.x + dragRect.width - hs, top: dragRect.y - hs },
       { left: dragRect.x - hs, top: dragRect.y + dragRect.height - hs },
       { left: dragRect.x + dragRect.width - hs, top: dragRect.y + dragRect.height - hs },
     ];
-    const edges = [
-      { left: dragRect.x + dragRect.width / 2 - hs, top: dragRect.y - hs }, // n
-      { left: dragRect.x + dragRect.width / 2 - hs, top: dragRect.y + dragRect.height - hs }, // s
-      { left: dragRect.x - hs, top: dragRect.y + dragRect.height / 2 - hs }, // w
-      { left: dragRect.x + dragRect.width - hs, top: dragRect.y + dragRect.height / 2 - hs }, // e
-    ];
+    // 左右遮罩：y/height 必须限制在 imageDisplay 范围内，防止框靠近边缘时遮罩溢出
+    const ly = Math.max(dTop, dragRect.y);
+    const lh = Math.min(dragRect.y + dragRect.height, dTop + dH) - ly;
+    const ry = Math.max(dTop, dragRect.y);
+    const rh = Math.min(dragRect.y + dragRect.height, dTop + dH) - ry;
     return (
       <View pointerEvents="none" style={styles.maskLayer}>
         <View style={{ position: 'absolute', left: dLeft, top: dTop, width: dW, height: Math.max(0, dragRect.y - dTop), backgroundColor: maskColor }} />
         <View style={{ position: 'absolute', left: dLeft, top: dragRect.y + dragRect.height, width: dW, height: Math.max(0, (dTop + dH) - (dragRect.y + dragRect.height)), backgroundColor: maskColor }} />
-        <View style={{ position: 'absolute', left: dLeft, top: dragRect.y, width: Math.max(0, dragRect.x - dLeft), height: dragRect.height, backgroundColor: maskColor }} />
-        <View style={{ position: 'absolute', left: dragRect.x + dragRect.width, top: dragRect.y, width: Math.max(0, (dLeft + dW) - (dragRect.x + dragRect.width)), height: dragRect.height, backgroundColor: maskColor }} />
+        <View style={{ position: 'absolute', left: dLeft, top: ly, width: Math.max(0, dragRect.x - dLeft), height: Math.max(0, lh), backgroundColor: maskColor }} />
+        <View style={{ position: 'absolute', left: dragRect.x + dragRect.width, top: ry, width: Math.max(0, (dLeft + dW) - (dragRect.x + dragRect.width)), height: Math.max(0, rh), backgroundColor: maskColor }} />
         <View style={{ position: 'absolute', left: dragRect.x, top: dragRect.y, width: dragRect.width, height: dragRect.height, borderWidth: 2, borderColor: colors.accent, borderRadius: radius.sm }} />
-        {/* 四角手柄（大圆点） */}
+        {/* 四角拖拽手柄 */}
         {corners.map((c, i) => (
           <View key={`c${i}`} style={[styles.cornerDot, { left: c.left, top: c.top }]} />
-        ))}
-        {/* 四边中点手柄（小方块） */}
-        {edges.map((e, i) => (
-          <View key={`e${i}`} style={[styles.edgeHandle, { left: e.left, top: e.top }]} />
         ))}
       </View>
     );
@@ -1129,6 +1177,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             onDeleteVersion={deleteVersion}
             onDownloadVersion={downloadVersionZip}
             onRefresh={async () => { await loadBundle(); }}
+            notify={notify}
           />
         </View>
       ) : bottomTab === 'canvas' ? (
@@ -1137,17 +1186,23 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       <View
         ref={canvasWrapRef}
         style={styles.canvasWrap}
-        onLayout={(e) => {
-          setCanvasSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height });
-          canvasWrapRef.current?.measureInWindow((x, y) => { canvasOriginRef.current = { x, y }; });
-        }}
-        {...(selectMode
-          ? { ...panResponder.panHandlers }
-          : { onTouchStart: handleCanvasTouchStart, onTouchMove: handleCanvasTouchMove, onTouchEnd: handleCanvasTouchEnd })}
+        // 查看模式下：touch handlers 处理双指缩放/单指拖动
+        // 框选模式下：手势由末尾的框选触摸层（panHandlers）处理
+        onTouchStart={handleCanvasTouchStart}
+        onTouchMove={handleCanvasTouchMove}
+        onTouchEnd={handleCanvasTouchEnd}
       >
-        {/* 缩放/平移变换层 */}
-        <View style={{ flex: 1, transform: canvasZoom > 1 || (canvasPan.x !== 0 || canvasPan.y !== 0)
-          ? [{ translateX: canvasPan.x }, { translateY: canvasPan.y }, { scale: canvasZoom }] : undefined }}>
+        {/* 缩放/平移变换层（只含图片，画框在外层保持坐标一致） */}
+        <View
+          style={{ flex: 1, transform: canvasZoom !== 1 || (canvasPan.x !== 0 || canvasPan.y !== 0)
+            ? [{ translateX: canvasPan.x }, { translateY: canvasPan.y }, { scale: canvasZoom }] : undefined }}
+          onLayout={(e) => {
+            // 尺寸测量放在内容层：底部工具栏显隐会改变内容区高度，但 wrap 自身尺寸不变、
+            // onLayout 不触发，会导致 imageDisplay 用过期尺寸计算、蒙版与图片错位
+            setCanvasSize({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height });
+            measureCanvasOrigin();
+          }}
+        >
           {currentImage ? (
             <Pressable
               style={imageDisplay
@@ -1168,13 +1223,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             </Pressable>
           )}
         </View>
-        {/* 缩放重置按钮 */}
-        {canvasZoom > 1 ? (
+        {/* 缩放重置按钮：缩放不为 1 或有平移时显示 */}
+        {(canvasZoom !== 1 || canvasPan.x !== 0 || canvasPan.y !== 0) ? (
           <Pressable onPress={resetCanvasZoom} style={styles.zoomResetBtn}>
             <Text style={styles.zoomResetText}>重置视图</Text>
           </Pressable>
         ) : null}
 
+        {/* 画框层：在外层 wrap 内，坐标空间与 canvasPoint/imageDisplay 一致 */}
         {renderCanvasMask()}
 
         {/* 框选模式提示条 */}
@@ -1205,6 +1261,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             <ToolBtn icon="enhance" label="清晰" colors={colors} disabled={!currentImage} onPress={() => runSpecial('enhance')} />
             <ToolBtn icon="droplet" label="去水印" colors={colors} disabled={!currentImage} onPress={() => runSpecial('watermark')} />
           </ScrollView>
+        ) : null}
+
+        {/* 框选触摸层：置于最上层，box-only 使其成为唯一触摸目标，
+            locationX/Y 即画布本地坐标，与蒙版渲染天然同参照系，无需任何测量换算 */}
+        {selectMode ? (
+          <View style={styles.selectTouchLayer} pointerEvents="box-only" {...panResponder.panHandlers} />
         ) : null}
       </View>
 
@@ -1270,7 +1332,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         <ScrollView horizontal style={styles.candidateBar} contentContainerStyle={styles.candidateList} showsHorizontalScrollIndicator={false}>
           {candidates.map((img) => (
             <Pressable key={img.id} onPress={() => useAsCurrent(img)} style={[styles.candidateItem, img.id === currentImage?.id && styles.candidateActive]}>
-              <Image source={imageSource(img.url, 320)} style={styles.candidateImage} resizeMode="cover" />
+              <RemoteImage source={imageSource(img.url, 320)} style={styles.candidateImage} resizeMode="cover" fallbackLabel="图片加载失败" />
             </Pressable>
           ))}
         </ScrollView>
@@ -1316,7 +1378,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           {currentImage ? (
             <View style={styles.canvasHint}>
               {imageSource(currentImage.url, 128) ? (
-                <Image source={imageSource(currentImage.url, 128)} style={styles.canvasHintThumb} resizeMode="cover" />
+                <RemoteImage source={imageSource(currentImage.url, 128)} style={styles.canvasHintThumb} resizeMode="cover" fallbackLabel="图片加载失败" />
               ) : null}
               <View style={styles.canvasHintTextWrap}>
                 <Text style={styles.canvasHintTitle}>正在编辑画布图片</Text>
@@ -1370,7 +1432,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             </Pressable>
           </View>
           {preview && (
-            <Image source={imageSource(preview.image.url, 1280)} style={styles.previewImage} resizeMode="contain" />
+            <ZoomableImage source={imageSource(preview.image.url, 1280)} style={styles.previewImage} resizeMode="contain" fallbackLabel="预览加载失败" />
           )}
           {preview && (
             <View style={styles.previewInfo}>
@@ -1653,27 +1715,7 @@ const countSelectStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     itemText: { fontSize: fontSize.sm },
   });
 
-/** 任务操作的中文名（与桌面端一致） */
-const OPERATION_LABELS: Record<string, string> = {
-  generate: '生成',
-  local_edit: '局部编辑',
-  local_edit_batch: '批量局部编辑',
-  outpaint: '扩图',
-  enhance: '清晰度提升',
-  remove_watermark: '去水印',
-  extract_asset: '提取素材',
-  edit_text: '图片改字',
-  batch_edit: '批量改图',
-  batch_generate: '批量文生图',
-  upload: '上传',
-};
 
-function formatTaskTime(iso: string | null): string {
-  if (!iso) return '';
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return '';
-  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
-}
 
 /** 任务队列面板：排队/进行中/失败任务一目了然，支持取消与失败重试 */
 function TasksPanel({ projectId, activeTask, failedTask, onRetry, onCancel }: {
@@ -1687,11 +1729,14 @@ function TasksPanel({ projectId, activeTask, failedTask, onRetry, onCancel }: {
   const styles = tasksPanelStyles(colors);
   const [tasks, setTasks] = useState<GenerationTask[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const pollStartRef = useRef(0);
+  const pollFailRef = useRef(0);
 
   const refresh = useCallback(async () => {
     try {
       const data = await api.listGeneratingTasks(projectId);
       setTasks(data.tasks);
+      pollFailRef.current = 0;
     } catch { /* 静默重试 */ } finally {
       setLoaded(true);
     }
@@ -1699,9 +1744,31 @@ function TasksPanel({ projectId, activeTask, failedTask, onRetry, onCancel }: {
 
   useEffect(() => {
     void refresh();
-    const timer = setInterval(() => { void refresh(); }, 2000);
+    pollStartRef.current = Date.now();
+    const MAX_POLL_MS = 10 * 60 * 1000;
+    const MAX_FAILS = 5;
+    const timer = setInterval(async () => {
+      // 超过 10 分钟停止轮询，避免长时间挂起耗电
+      if (Date.now() - pollStartRef.current > MAX_POLL_MS) {
+        clearInterval(timer);
+        return;
+      }
+      try {
+        const data = await api.listGeneratingTasks(projectId);
+        setTasks(data.tasks);
+        pollFailRef.current = 0;
+      } catch {
+        pollFailRef.current += 1;
+        // 连续失败 5 次停止轮询，等待用户主动刷新
+        if (pollFailRef.current >= MAX_FAILS) {
+          clearInterval(timer);
+        }
+      } finally {
+        setLoaded(true);
+      }
+    }, 2000);
     return () => clearInterval(timer);
-  }, [refresh]);
+  }, [refresh, projectId]);
 
   const rows = tasks.length ? tasks : activeTask ? [activeTask] : [];
 
@@ -1725,7 +1792,7 @@ function TasksPanel({ projectId, activeTask, failedTask, onRetry, onCancel }: {
         <View key={task.id} style={styles.row}>
           <View style={styles.rowMain}>
             <Text style={styles.rowTitle}>
-              {OPERATION_LABELS[task.operationType || ''] || task.operationType || '任务'}
+              {TASK_OPERATION_LABELS[task.operationType || ''] || task.operationType || '任务'}
               {task.status === 'queued' ? ' · 排队中' : ' · 进行中'}
             </Text>
             <Text style={styles.rowSub}>
@@ -1803,7 +1870,7 @@ function MessageBubble({ message, imagesById, colors, onImagePress }: { message:
         <View style={bubbleStyles.msgImages}>
           {outputImages.map((img) => (
             <Pressable key={img.id} onPress={() => onImagePress(img)}>
-              <Image source={imageSource(img.url, 320)} style={bubbleStyles.msgImage} resizeMode="cover" />
+              <RemoteImage source={imageSource(img.url, 320)} style={bubbleStyles.msgImage} resizeMode="cover" fallbackLabel="图片加载失败" />
             </Pressable>
           ))}
         </View>
@@ -1838,11 +1905,11 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     canvasEmpty: { alignItems: 'center', justifyContent: 'center', flex: 1, alignSelf: 'stretch' },
     canvasEmptyText: { marginTop: spacing.md, fontSize: fontSize.md, color: c.muted, textAlign: 'center', paddingHorizontal: spacing.xl },
     maskLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
-    cornerDot: { position: 'absolute', width: 8, height: 8, backgroundColor: c.accent, borderRadius: 2 },
-    edgeHandle: { position: 'absolute', width: 20, height: 20, backgroundColor: '#fff', borderWidth: 2, borderColor: c.accent, borderRadius: 4 },
+    selectTouchLayer: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0 },
+    cornerDot: { position: 'absolute', width: 12, height: 12, backgroundColor: c.accent, borderRadius: 2 },
     selectHintBar: { position: 'absolute', top: spacing.md, alignSelf: 'center', flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: 6 },
     selectHintText: { color: '#fff', fontSize: fontSize.xs },
-    selectActionBar: { position: 'absolute', bottom: spacing.md, left: spacing.md, right: spacing.md, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: c.card, borderRadius: radius.md, borderWidth: 1, borderColor: c.border, padding: spacing.sm },
+    selectActionBar: { flexGrow: 0, flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderTopWidth: 1, borderTopColor: c.border, backgroundColor: c.card },
     selectCancelBtn: { height: 38, paddingHorizontal: spacing.md, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, alignItems: 'center', justifyContent: 'center' },
     selectCancelText: { color: c.textSecondary, fontSize: fontSize.sm },
     selectSizeText: { flex: 1, textAlign: 'center', fontSize: fontSize.xs, color: c.muted },

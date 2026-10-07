@@ -1,9 +1,8 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
   FlatList,
-  Image,
   Modal,
   Pressable,
   RefreshControl,
@@ -12,6 +11,8 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import { RemoteImage } from '../components/RemoteImage';
+import { ProjectFormModal } from './workspace/ProjectFormModal';
 import * as DocumentPicker from 'expo-document-picker';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
@@ -40,36 +41,55 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
   const insets = useSafeAreaInsets();
   const styles = makeStyles(colors);
   const [createOpen, setCreateOpen] = useState(false);
-  const [newName, setNewName] = useState('');
-  const [newDesc, setNewDesc] = useState('');
-  const [search, setSearch] = useState('');
   const [creating, setCreating] = useState(false);
+  const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [search, setSearch] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  // 搜索防抖：250ms 内连续按键合并为一次过滤计算
+  useEffect(() => {
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    searchTimerRef.current = setTimeout(() => setDebouncedSearch(search), 250);
+    return () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); };
+  }, [search]);
   const [refreshing, setRefreshing] = useState(false);
   const [menuVisible, setMenuVisible] = useState(false);
+  const [projectMenu, setProjectMenu] = useState<Project | null>(null);
   const [renameTarget, setRenameTarget] = useState<Project | null>(null);
-  const [renameValue, setRenameValue] = useState('');
-  const [renameDesc, setRenameDesc] = useState('');
   const [busy, setBusy] = useState('');
   const [filter, setFilter] = useState<'all' | 'updated' | 'favorite'>('all');
 
   const filtered = useMemo(() => {
-    let list = projects.filter((p) => !search || p.name.toLowerCase().includes(search.toLowerCase()));
+    let list = projects.filter((p) => !debouncedSearch || p.name.toLowerCase().includes(debouncedSearch.toLowerCase()));
     if (filter === 'favorite') list = list.filter((p) => p.isFavorite);
+    if (filter === 'updated') {
+      // 「最近」：近 7 天更新过的项目，按更新时间倒序
+      const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+      list = list.filter((p) => new Date(p.updatedAt).getTime() >= sevenDaysAgo);
+    }
     list.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     return list;
-  }, [projects, search, filter]);
+  }, [projects, debouncedSearch, filter]);
 
-  async function handleCreate() {
-    if (!newName.trim() || creating) return;
+  async function handleCreate(name: string, desc: string) {
+    if (!name.trim() || creating) return;
     setCreating(true);
     try {
-      await onCreate({ name: newName.trim(), description: newDesc.trim() });
+      await onCreate({ name: name.trim(), description: desc.trim() });
       setCreateOpen(false);
-      setNewName('');
-      setNewDesc('');
     } finally {
       setCreating(false);
     }
+  }
+
+  async function handleSubmitRename(name: string, desc: string) {
+    if (!renameTarget || !name.trim()) return;
+    try {
+      await api.updateProject(renameTarget.id, { name: name.trim(), description: desc.trim() });
+      setRenameTarget(null);
+      await onRefresh();
+      notify('已更新');
+    } catch (e) { notify((e as Error).message, 'error'); }
   }
 
   const onRefreshData = useCallback(async () => {
@@ -85,20 +105,6 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
-  function confirmDelete(project: Project) {
-    Alert.alert('删除项目', `确定删除「${project.name}」吗？可在本地数据库中软删除，不影响图片文件。`, [
-      { text: '取消', style: 'cancel' },
-      {
-        text: '删除',
-        style: 'destructive',
-        onPress: async () => {
-          try { await api.deleteProject(project.id); await onRefresh(); notify('项目已删除'); }
-          catch (e) { notify((e as Error).message, 'error'); }
-        },
-      },
-    ]);
-  }
-
   async function duplicate(project: Project) {
     try { await api.duplicateProject(project.id); await onRefresh(); notify('项目已复制'); }
     catch (e) { notify((e as Error).message, 'error'); }
@@ -106,19 +112,9 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
 
   function rename(project: Project) {
     setRenameTarget(project);
-    setRenameValue(project.name);
-    setRenameDesc(project.description || '');
   }
 
-  async function submitRename() {
-    if (!renameTarget || !renameValue.trim()) return;
-    try {
-      await api.updateProject(renameTarget.id, { name: renameValue.trim(), description: renameDesc.trim() });
-      setRenameTarget(null);
-      await onRefresh();
-      notify('已更新');
-    } catch (e) { notify((e as Error).message, 'error'); }
-  }
+
 
   async function exportProject(project: Project) {
     try {
@@ -171,13 +167,20 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
   }
 
   function openProjectMenu(project: Project) {
-    Alert.alert(project.name, undefined, [
-      { text: project.isFavorite ? '取消收藏' : '收藏', onPress: () => void toggleFavorite(project) },
-      { text: '重命名', onPress: () => rename(project) },
-      { text: '复制', onPress: () => void duplicate(project) },
-      { text: '导出 ZIP', onPress: () => void exportProject(project) },
-      { text: '删除', style: 'destructive', onPress: () => confirmDelete(project) },
+    setProjectMenu(project);
+  }
+
+  function confirmDeleteProject(project: Project) {
+    Alert.alert('删除项目', `确定删除「${project.name}」吗？此操作为软删除，不影响图片文件。`, [
       { text: '取消', style: 'cancel' },
+      {
+        text: '删除',
+        style: 'destructive',
+        onPress: async () => {
+          try { await api.deleteProject(project.id); await onRefresh(); notify('项目已删除'); }
+          catch (e) { notify((e as Error).message, 'error'); }
+        },
+      },
     ]);
   }
 
@@ -251,6 +254,7 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
           numColumns={2}
           columnWrapperStyle={{ gap: spacing.md }}
           removeClippedSubviews={true}
+          initialNumToRender={6}
           maxToRenderPerBatch={6}
           windowSize={4}
           keyboardShouldPersistTaps="handled"
@@ -281,74 +285,27 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
       )}
 
       {/* Create Modal */}
-      <Modal visible={createOpen} animationType="fade" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>新建项目</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={newName}
-              onChangeText={setNewName}
-              placeholder="项目名称"
-              placeholderTextColor={colors.muted}
-              autoFocus
-            />
-            <TextInput
-              style={[styles.modalInput, styles.modalDesc]}
-              value={newDesc}
-              onChangeText={setNewDesc}
-              placeholder="项目描述（可选）"
-              placeholderTextColor={colors.muted}
-              multiline
-              numberOfLines={3}
-            />
-            <View style={styles.modalActions}>
-              <Pressable style={styles.modalCancel} onPress={() => { setCreateOpen(false); setNewName(''); setNewDesc(''); }}>
-                <Text style={styles.modalCancelText}>取消</Text>
-              </Pressable>
-              <Pressable style={[styles.modalSubmit, (!newName.trim() || creating) && { opacity: 0.5 }]} onPress={handleCreate} disabled={!newName.trim() || creating}>
-                {creating ? <ActivityIndicator color="#fff" /> : <Text style={styles.modalSubmitText}>创建</Text>}
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <ProjectFormModal
+        visible={createOpen}
+        title="新建项目"
+        submitLabel="创建"
+        busy={creating}
+        onSubmit={handleCreate}
+        onCancel={() => setCreateOpen(false)}
+      />
 
       {/* Rename Modal */}
-      <Modal visible={Boolean(renameTarget)} animationType="fade" transparent>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalCard}>
-            <Text style={styles.modalTitle}>编辑项目</Text>
-            <TextInput
-              style={styles.modalInput}
-              value={renameValue}
-              onChangeText={setRenameValue}
-              placeholder="项目名称"
-              placeholderTextColor={colors.muted}
-              autoFocus
-            />
-            <TextInput
-              style={[styles.modalInput, styles.modalDesc]}
-              value={renameDesc}
-              onChangeText={setRenameDesc}
-              placeholder="项目描述（可选）"
-              placeholderTextColor={colors.muted}
-              multiline
-              numberOfLines={3}
-            />
-            <View style={styles.modalActions}>
-              <Pressable style={styles.modalCancel} onPress={() => setRenameTarget(null)}>
-                <Text style={styles.modalCancelText}>取消</Text>
-              </Pressable>
-              <Pressable style={[styles.modalSubmit, !renameValue.trim() && { opacity: 0.5 }]} onPress={submitRename} disabled={!renameValue.trim()}>
-                <Text style={styles.modalSubmitText}>保存</Text>
-              </Pressable>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      <ProjectFormModal
+        visible={Boolean(renameTarget)}
+        title="编辑项目"
+        initialName={renameTarget?.name || ''}
+        initialDesc={renameTarget?.description || ''}
+        submitLabel="保存"
+        onSubmit={handleSubmitRename}
+        onCancel={() => setRenameTarget(null)}
+      />
 
-      {/* Menu Modal */}
+      {/* Menu modal */}
       <Modal visible={menuVisible} animationType="fade" transparent>
         <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
           <View style={styles.menuCard}>
@@ -357,6 +314,25 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
             <MenuItem icon="zip" label="下载完整备份" colors={colors} onPress={() => { setMenuVisible(false); void downloadBackup(); }} />
             <MenuItem icon={mode === 'dark' ? 'sun' : 'moon'} label={mode === 'dark' ? '切换为亮色模式' : '切换为暗色模式'} colors={colors} onPress={() => { toggle(); setMenuVisible(false); }} />
             <MenuItem icon="logout" label="退出登录" colors={colors} destructive onPress={() => { setMenuVisible(false); onLogout(); }} />
+          </View>
+        </Pressable>
+      </Modal>
+
+      {/* Project action sheet */}
+      <Modal visible={Boolean(projectMenu)} animationType="slide" transparent>
+        <Pressable style={styles.sheetOverlay} onPress={() => setProjectMenu(null)}>
+          <View style={styles.sheetCard}>
+            {projectMenu ? <Text style={styles.sheetTitle} numberOfLines={1}>{projectMenu.name}</Text> : null}
+            <MenuItem
+              icon={projectMenu?.isFavorite ? 'starFilled' : 'star'}
+              label={projectMenu?.isFavorite ? '取消收藏' : '收藏'}
+              colors={colors}
+              onPress={() => { if (projectMenu) { void toggleFavorite(projectMenu); setProjectMenu(null); } }}
+            />
+            <MenuItem icon="edit" label="重命名" colors={colors} onPress={() => { if (projectMenu) { rename(projectMenu); setProjectMenu(null); } }} />
+            <MenuItem icon="copy" label="复制" colors={colors} onPress={() => { if (projectMenu) { void duplicate(projectMenu); setProjectMenu(null); } }} />
+            <MenuItem icon="zip" label="导出 ZIP" colors={colors} onPress={() => { if (projectMenu) { void exportProject(projectMenu); setProjectMenu(null); } }} />
+            <MenuItem icon="trash" label="删除项目" colors={colors} destructive onPress={() => { if (projectMenu) { setProjectMenu(null); confirmDeleteProject(projectMenu); } }} />
           </View>
         </Pressable>
       </Modal>
@@ -384,7 +360,7 @@ function ProjectCard({ item, colors, onPress, onMenu }: { item: Project; colors:
       onPress={() => { if (!menuPressedRef.current) onPress(); }}
     >
       {item.coverUrl ? (
-        <Image source={imageSource(thumbUrl(item.coverUrl))} style={styles.cardCover} resizeMode="cover" />
+        <RemoteImage source={imageSource(thumbUrl(item.coverUrl))} style={styles.cardCover} resizeMode="cover" fallbackLabel="封面加载失败" />
       ) : (
         <View style={[styles.cardCover, styles.cardPlaceholder]}>
           <Icon name="image" size={40} color={colors.muted} />
@@ -478,6 +454,9 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     menuOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'flex-end', justifyContent: 'flex-start', padding: spacing.lg, paddingTop: 70 },
     menuCard: { width: 250, backgroundColor: c.card, borderRadius: radius.md, paddingVertical: spacing.sm, borderWidth: 1, borderColor: c.border },
     menuTitle: { fontSize: fontSize.xs, color: c.muted, paddingHorizontal: spacing.lg, paddingBottom: spacing.xs },
+    sheetOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end', padding: spacing.md },
+    sheetCard: { backgroundColor: c.card, borderRadius: radius.lg, paddingVertical: spacing.sm, borderWidth: 1, borderColor: c.border },
+    sheetTitle: { fontSize: fontSize.sm, color: c.muted, paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderBottomWidth: 1, borderBottomColor: c.border, marginBottom: spacing.xs },
     busyOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
     busyCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
     busyText: { color: c.text, fontSize: fontSize.sm },

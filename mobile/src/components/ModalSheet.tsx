@@ -1,5 +1,5 @@
 import React from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../theme';
 import { fontSize, spacing } from '../theme';
@@ -27,7 +27,12 @@ export function ModalSheet({ visible, title, onClose, children, footer }: Props)
             <Icon name="close" size={20} color={colors.text} />
           </Pressable>
         </View>
-        <View style={styles.body}>{children}</View>
+        <KeyboardAvoidingView
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          style={styles.body}
+        >
+          {children}
+        </KeyboardAvoidingView>
         {footer ? <View style={[styles.footer, { paddingBottom: (insets.bottom || 0) + spacing.md }]}>{footer}</View> : null}
       </View>
     </Modal>

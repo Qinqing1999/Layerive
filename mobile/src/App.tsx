@@ -1,8 +1,8 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { Component, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { StyleSheet, Text, View } from 'react-native';
+import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler } from './api';
+import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler, setConnectionChangeHandler, setConnectionRetryHandler } from './api';
 import { ThemeProvider, useTheme } from './theme';
 import { fontSize, radius, spacing } from './theme';
 import type { ModelConfig, Project } from './types';
@@ -27,6 +27,7 @@ function AppShell() {
   const [activeModel, setActiveModel] = useState('');
   const [activeVisionModel, setActiveVisionModel] = useState('');
   const [loading, setLoading] = useState(true);
+  const [offline, setOffline] = useState(false);
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => {
@@ -74,6 +75,21 @@ function AppShell() {
     return () => setSessionExpiredHandler(null);
   }, []);
 
+  // 网络连接状态：断网时显示持久横幅，恢复时自动隐藏
+  useEffect(() => {
+    setConnectionChangeHandler((online: boolean) => setOffline(!online));
+    return () => setConnectionChangeHandler(null);
+  }, []);
+
+  // 网络恢复后自动重放断网期间失败的幂等 GET 请求；成功后刷新当前视图数据
+  useEffect(() => {
+    setConnectionRetryHandler(() => {
+      // 收到任一重放成功：刷新项目列表与模型列表（当前在 home 或 workspace 都适用）
+      void loadAll();
+    });
+    return () => setConnectionRetryHandler(null);
+  }, [loadAll]);
+
   const onLoginSuccess = useCallback(async () => {
     setAuthState('authed');
     setLoading(true);
@@ -106,6 +122,7 @@ function AppShell() {
       <View style={styles.root}>
         <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
         <LoginScreen onSuccess={onLoginSuccess} notify={notify} />
+        {offline && <OfflineBanner colors={colors} />}
         {toast && <ToastView toast={toast} colors={colors} />}
       </View>
     );
@@ -114,6 +131,7 @@ function AppShell() {
   return (
     <View style={styles.root}>
       <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
+      {offline && <OfflineBanner colors={colors} />}
       {view.name === 'home' && (
         <HomeScreen
           projects={projects}
@@ -144,11 +162,48 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <ThemeProvider>
-        <AppShell />
+        <ErrorBoundary>
+          <AppShell />
+        </ErrorBoundary>
       </ThemeProvider>
     </SafeAreaProvider>
   );
 }
+
+type ErrorBoundaryState = { error: Error | null };
+class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryState> {
+  state: ErrorBoundaryState = { error: null };
+  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
+    return { error };
+  }
+  componentDidCatch(error: Error, info: { componentStack: string }) {
+    console.error('App crashed:', error, info);
+  }
+  reset = () => this.setState({ error: null });
+  render() {
+    if (this.state.error) {
+      return (
+        <View style={errorBoundaryStyles.container}>
+          <Icon name="close" size={48} color="#ef4444" />
+          <Text style={errorBoundaryStyles.title}>应用遇到错误</Text>
+          <Text style={errorBoundaryStyles.message}>{this.state.error.message}</Text>
+          <Pressable style={errorBoundaryStyles.btn} onPress={this.reset}>
+            <Text style={errorBoundaryStyles.btnText}>点击重试</Text>
+          </Pressable>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const errorBoundaryStyles = StyleSheet.create({
+  container: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl, gap: spacing.md, backgroundColor: '#fff' },
+  title: { fontSize: fontSize.xl, fontWeight: '700', color: '#111' },
+  message: { fontSize: fontSize.sm, color: '#666', textAlign: 'center' },
+  btn: { marginTop: spacing.sm, paddingVertical: spacing.sm, paddingHorizontal: spacing.lg, backgroundColor: '#6d55f7', borderRadius: radius.md },
+  btnText: { color: '#fff', fontSize: fontSize.md, fontWeight: '600' },
+});
 
 function ToastView({ toast, colors }: { toast: Toast; colors: ReturnType<typeof useTheme>['colors'] }) {
   return (
@@ -158,6 +213,25 @@ function ToastView({ toast, colors }: { toast: Toast; colors: ReturnType<typeof 
     </View>
   );
 }
+
+function OfflineBanner({ colors }: { colors: ReturnType<typeof useTheme>['colors'] }) {
+  return (
+    <View style={[offlineStyles.banner, { backgroundColor: colors.danger }]}>
+      <Icon name="close" size={14} color="#fff" />
+      <Text style={offlineStyles.text}>网络连接已断开，请检查网络后重试</Text>
+    </View>
+  );
+}
+
+const offlineStyles = StyleSheet.create({
+  banner: {
+    position: 'absolute', top: 0, left: 0, right: 0,
+    paddingVertical: spacing.sm, paddingHorizontal: spacing.md,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs,
+    zIndex: 10000, elevation: 20,
+  },
+  text: { color: '#fff', fontSize: fontSize.sm, fontWeight: '600' },
+});
 
 const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({

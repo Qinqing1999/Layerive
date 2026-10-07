@@ -42,6 +42,7 @@ export type IconName =
   | 'zip'
   | 'chevronRight'
   | 'chevronDown'
+  | 'chevronUp'
   | 'camera'
   | 'eye'
   | 'eyeOff'
@@ -101,6 +102,7 @@ const ICON_MAP: Record<string, keyof typeof Ionicons.glyphMap> = {
   zip: 'file-tray',
   chevronRight: 'chevron-forward',
   chevronDown: 'chevron-down',
+  chevronUp: 'chevron-up',
   camera: 'camera',
   eye: 'eye',
   eyeOff: 'eye-off',

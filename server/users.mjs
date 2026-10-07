@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { DATA_ROOT } from './db.mjs';
 
@@ -9,6 +9,13 @@ import { DATA_ROOT } from './db.mjs';
 // (works inside projects only).
 const usersPath = path.join(DATA_ROOT, 'users.json');
 mkdirSync(path.dirname(usersPath), { recursive: true });
+
+/** 原子写入：先写临时文件再 rename，避免写入中途崩溃导致用户数据损坏 */
+function atomicWriteUsers(file, content) {
+  const tmp = `${file}.${process.pid}.tmp`;
+  writeFileSync(tmp, content, 'utf8');
+  renameSync(tmp, file);
+}
 
 const hash = (value) => createHash('sha256').update(`layerive:${value}`).digest('hex');
 const normalizeRole = (value) => (value === 'admin' ? 'admin' : 'user');
@@ -33,7 +40,7 @@ export function readUsers() {
 }
 
 export function writeUsers(users) {
-  writeFileSync(usersPath, `${JSON.stringify(users, null, 2)}\n`, 'utf8');
+  atomicWriteUsers(usersPath, `${JSON.stringify(users, null, 2)}\n`);
 }
 
 export function verifyLogin(username, password) {

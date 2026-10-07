@@ -3,7 +3,7 @@
 > **维护契约（必须遵守）**：只要改动了项目的功能、架构、数据结构、API、模型适配、运行方式、文件位置或重要约束，必须在同一次改动中更新本文件。先核对相关实现，再更新受影响章节；不要仅凭 README 推断。纯格式调整且不改变行为时可不更新。  
 > 更新时请同步修改本文的“最后核对”日期和相应内容；若现有描述不再可信，优先修正文档而不是保留过期说明。
 
-**最后核对**：2026-09-29
+**最后核对**：2026-10-08
 **项目定位**：Layerive（移动端产品名「像素变换」）是一个仅本地运行的、以“项目 + 图片版本树”为中心的 AI 图片创作工作台。它将文生图、基于图片的编辑、文字编辑、局部编辑、扩图、去水印、对话记录和项目备份统一保存到本机；同一套后端同时服务浏览器版、Electron 桌面版和 Expo React Native 移动端。
 
 ## 1. 运行与边界
@@ -31,7 +31,7 @@
 - 项目持久化：保存项目描述、封面、当前图片/版本、默认图片模型和工作台草稿。工作台草稿每次变更先写入 `localStorage` 的 `layerive-draft:<projectId>` 恢复副本，服务端保存成功后删除；网络失败时阻止内部离开工作台，刷新 / 关窗后可从该副本恢复。
 - 素材上传：无论项目是否已有图片，均可继续上传 PNG、JPEG、WebP（单文件最大 10MB）；服务端会解析并保存原图宽高。新上传图片会立即成为当前画布和下一次编辑的输入素材，输出比例优先跟随原图比例（自动取当前模型支持尺寸中最接近的一档）；从历史或候选图选用输入图时同样生效。也支持在工作台任意位置（含画布）直接 Ctrl+V 粘贴剪贴板图片，走同一上传流程；文本框内的粘贴始终以文本优先，上传进行中会忽略重复粘贴。
 - 项目导出 / 导入：导出单项目 ZIP，导入时生成新的项目及关联 ID。
-- 完整备份 / 恢复：备份 SQLite、项目图片、画廊配图和模型配置；导出与导入统一限制 ZIP 至 10,000 个条目、单条 512MB、总解压后 2GB。恢复会进入维护状态，取消并等待在途任务完成，再在隔离目录校验 ZIP 路径、数据库完整性、外键、必要表及字段；随后 checkpoint 并创建含同样内容的安全备份，最后替换数据并重启服务。服务启动时会为全部未删除项目重建标准素材目录，因此空项目也可在恢复后继续上传和生成。
+- 完整备份 / 恢复：备份 SQLite、项目图片、画廊配图和模型配置；导出与导入统一限制 ZIP 至 10,000 个条目、单条 512MB、总解压后 2GB。恢复会进入维护状态，取消并等待在途任务完成，再在隔离目录校验 ZIP 路径、数据库完整性、外键、必要表及字段；随后 checkpoint 并创建含同样内容的安全备份，最后替换数据并重启服务。服务启动时会为全部未删除项目重建标准素材目录，因此空项目也可在恢复后继续上传和生成。**清理策略**：`cleanupOrphanFiles` 定时跳过活跃项目（`generating/queued`）的文件，temp/ 子目录仅清理 mtime 超过 2 小时的旧临时文件。
 
 ### 图片创作与编辑
 
@@ -78,14 +78,40 @@
 
 Expo React Native 客户端，仅作为**使用者**接入同一后端：不能新增 / 编辑 / 删除模型或提供商，只能从已有模型列表中选择。
 
-- 认证与连接：登录页（用户名 / 密码）可展开「连接其他服务器」填写后端地址（默认 `http://<电脑IP>:8788`），地址持久化于 AsyncStorage（`pixelforge-server-base`）；token 与主题同样持久化。图片经 `imageSource(url)` 以 `{ uri, headers }` 携带 Bearer 加载，下载 / 分享经 `downloadToCache()` 带 header 拉到缓存目录。
+- 认证与连接：登录页（用户名 / 密码）可展开「连接其他服务器」填写后端地址（默认 `http://<电脑IP>:8788`），地址持久化于 AsyncStorage（`pixelforge-server-base`）；token 与主题同样持久化。图片经 `imageSource(url)` 以 `{ uri, headers }` 携带 Bearer 加载，下载 / 分享经 `downloadToCache()` 带 header 拉到缓存目录。**断网检测**：`api.ts` 维护 `onlineState` 全局状态，网络请求失败时自动标记离线、恢复成功时标记在线；`App.tsx` 注册回调并在顶部渲染 OfflineBanner（红色横幅），提示用户网络连接已断开。
 - 项目库：列表、创建、重命名、收藏、复制、软删除、导出项目 ZIP（DocumentPicker 导入，>500MB 拒绝）、完整备份下载与系统分享；顶栏切换暗色模式。
 - 工作台：对话生成 / 图生图、候选图与消息画廊点击切换画布、上传与粘贴式选图、异步任务轮询（含 `stage` 阶段文案）。专项操作覆盖改字（识别分段可编辑 / 手动新增）、局部编辑（`RectSelector` 百分比框选 + 指令 + 可选参考图）、扩图（`mobile/src/sizes.ts` 镜像 Web 尺寸目录：原比例优先置顶高亮，再列主流比例，按当前模型 provider 映射支持尺寸）、变清晰、去水印、提取素材（expo-image-manipulator 裁剪截图替代 Web canvas，含最小边放大 / 最大边缩小 / JPEG 压缩）。
 - 批量：批量改图 / 批量文生图两个子模式，支持变量模板（≤10 变量）与提示词列表（2–50 条）录入，轮询 `/batch-edits/:taskId` 展示逐张缩略图、失败数、ETA 与取消。
-- 版本与对比：历史版本列表（从历史继续创作即设 `parentVersionId`）、多图版本 ZIP 下载、版本删除（有子版本时确认 force）、父子版本滑块对比。
+- 版本与对比：历史版本列表（从历史继续创作即设 `parentVersionId`）、多图版本 ZIP 下载、版本删除（有子版本时确认 force）、父子版本滑块对比；对比模态框在有任一图为空时显示空状态提示。
 - 提示词画廊：分类浏览、点击填入提示词、收藏当前画布图片（走 `/api/gallery/from-image` 自动提炼）。
 - 暗色模式：`mobile/src/theme.tsx` 的 ThemeProvider + `makeStyles(colors)` 工厂（避免模块级 StyleSheet 缓存旧色值），偏好存 AsyncStorage（`pixelforge-theme-mode`）。
 - 移动端改动要求：服务端能力变更时同步 `mobile/src/api.ts` 与 `mobile/src/types.ts`；新界面颜色一律走 `useTheme()` 色板，不得写死色值。
+- **稳定性增强**：
+  - `WorkspaceScreen` 画布支持 PanResponder 与触摸处理器共存：框选模式下 PanResponder 只响应单指（`touches.length < 2`），双指自由传递给双指缩放；Canvas 同时挂载两者，`handleCanvasTouch*` 内部检查 `!selectMode` 避免单指冲突。
+  - Undo/redo 栈每项记录 `{ imageId, versionId, url }`；撤销/重做时同时更新 `currentImageId` 和 `currentVersionId` 并异步 PATCH 到服务端。
+  - 提交生成使用 `submittingRef` 防止连点重复提交（重复时直接 return）。
+  - 长任务/重试时 controller 登记到 `runningTasks` Map，`restore` abort 能中止进行中的重试。
+  - `EditTextModal` 识别失败时显示错误信息和重试按钮（`retryRecognize`）；段落支持上/下移动排序（`moveSegment`）。
+  - `useAsCurrent` / `useVersion` 在 PATCH 服务端失败时回滚乐观更新并显示错误 Toast。
+  - `HomeScreen` 「最近」tab 过滤近 7 天内更新的项目并排序。
+  - `App.tsx` 内置 `ErrorBoundary` 类组件，崩溃时显示错误信息 + 「点击重试」按钮（调用 `reset` 重新挂载子树）。
+  - `api.ts` 请求封装支持幂等 GET 最多 2 次指数退避重试（500ms / 1500ms），429 和网络错误均触发重试；同时维护全局并发上限（`MAX_CONCURRENCY = 6`），超出时排队，避免连点/批量操作压垮本地服务端。
+  - `LoginScreen` 表单提交前有 inline 错误提示（用户名/密码为空时拦截并显示）。
+  - `GalleryModal` 顶部分类筛选 chip 行（全部 / 我的收藏 / 人像 / 场景 / 产品 / 风格 / 其他），实时过滤条目。
+  - `BatchModal` 任务失败/取消且有 failed 项时显示「重试失败项」按钮，复用相同入参重新提交新任务。
+  - `HistoryModal` 顶部「多选」入口进入批量模式，支持全选、批量下载 ZIP、批量删除（含子版本强制删除确认）。
+  - `CropView` 选区有效性同时校验百分比（≥2% × ≥2%）和像素（≥32×32px），尺寸文本实时显示百分比和像素值，避免原图过小时裁剪出无效内容。
+  - `HistoryModal` 接收 `notify` prop（Toast 反馈），内部不再使用空实现的 `notifyIfAvailable`；`parentNumberOf` 用 `idToNumber` Map 替代 `find` 查找父版本号，复杂度由 O(n²) 降为 O(n)。
+  - `BatchModal` 轮询加 `pollStartRef` 与 `pollFailCountRef`，上限 `MAX_POLL_MS = 10 分钟`、连续失败 `MAX_FAILS = 5` 次后停止并报错，避免无限轮询耗电。
+  - `TasksPanel` 轮询同模式加超时与失败计数（`MAX_POLL_MS = 10 分钟` / `MAX_FAILS = 5`），连续失败 5 次或超过 10 分钟自动停止，避免无意义挂起耗电。
+  - `api.ts` 断网期间失败的幂等 GET 请求入 `pendingRetryQueue`（最多 20 条），网络恢复时由 `connectionRetryHandler` 重放并触发 `App.tsx` 的 `loadAll()` 刷新；`App.tsx` 通过 `setConnectionRetryHandler` 注册回调。
+  - `CompareModal` 用 `stageRef.measureInWindow` 获取舞台屏幕绝对坐标替代 `onLayout` 的 `layout.x`，修复模态框内嵌套布局下水平偏移量计算偏差。
+  - `HomeScreen` 搜索框加 250ms 防抖（`searchTimerRef` + `setDebouncedSearch`），过滤 `useMemo` 依赖 `debouncedSearch`，避免每次按键触发重算。
+  - 抽取 `mobile/src/labels.ts` 集中管理中文标签与时间格式化函数（`OPERATION_LABELS` / `STATUS_LABELS` / `STAGE_LABELS` / `BATCH_STATUS_LABELS` / `TASK_OPERATION_LABELS` / `formatRelativeTime` / `formatDateTime` / `formatTaskTime`），`HistoryModal`、`BatchModal`、`WorkspaceScreen` 改为从此导入；`WorkspaceScreen` 因等待文案带 "…" 后缀（如「视觉定位中…」）保留本地 `STAGE_LABELS`，仅迁移 `OPERATION_LABELS`→`TASK_OPERATION_LABELS` 与 `formatTaskTime`。
+  - `ModalSheet` body 统一包 `KeyboardAvoidingView`（iOS `padding` 行为），覆盖所有 sheet 内含 `TextInput` 的场景（`EditTextModal`、`BatchModal`、`CompareModal`、`GalleryModal` 等）；`HomeScreen` 顶部新建/重命名 Modal 单独包裹。
+  - 各主要 `FlatList` 加 `initialNumToRender` / `maxToRenderPerBatch` / `windowSize`（HomeScreen 6/6/4、GalleryModal 6/6/5、HistoryModal 6/6/5、EditTextModal 10/10/5）减少首屏渲染压力。
+  - 新增 `mobile/src/components/RemoteImage.tsx` 组件：`onError` 时显示占位卡片（"图片加载失败"），`source` 为 `undefined` 时直接显示占位，替换 11 处远程图片调用（HomeScreen 封面、GalleryModal 缩略图、BatchModal 进度缩略图、HistoryModal 版本图与子版本图、WorkspaceScreen 候选图/画布缩略图/预览图/消息气泡图、CompareModal 前后图）；`Image.getSize` 与 base64 source 仍用原生 `Image`。
+  - 新增 `mobile/src/screens/workspace/ProjectFormModal.tsx` 组件：封装项目创建/编辑共用表单（标题 + 名称 + 描述 + 提交/取消），内置 `KeyboardAvoidingView` 防键盘遮挡；HomeScreen 的两个内联 Modal 替换为 `<ProjectFormModal>`，减少约 50 行重复代码。
 
 ## 3. 目录职责
 
@@ -105,12 +131,12 @@ src/                        React 单页应用
   gallery.ts                由脚本生成、供 UI 使用；不要手改
   styles.css                全站样式
 server/
-  index.mjs                 HTTP 路由、用户与角色守卫、任务队列、生成任务、模型调用、项目与备份逻辑
+  index.mjs                 HTTP 路由、用户与角色守卫、任务队列、生成任务、模型调用、项目与备份逻辑；含结构化访问日志（reqId / 耗时 / 用户 JSON）和僵尸任务扫描定时器（60s，将 generating 但内存无 entry 的任务标记失败）
   db.mjs                    SQLite 初始化、目录常量、DTO 转换
-  users.mjs                 DATA_ROOT/users.json 账号存储、登录校验与用户增删改（至少保留一个管理员）
-  models.mjs                config/models.json 的读写、脱敏与模型规范化（含 apiKeys Key 池轮询）
+  users.mjs                 DATA_ROOT/users.json 账号存储、登录校验与用户增删改（至少保留一个管理员）；写操作原子化（tmp+rename）
+  models.mjs                config/models.json 的读写、脱敏与模型规范化（含 apiKeys Key 池轮询）；写操作原子化
   png.mjs                   演示图和缩略图的 PNG 工具
-  local-edit.mjs            Sharp 图片规范化（含日日新请求副本）、坐标校验、参考主体裁剪合成、框外像素保留
+  local-edit.mjs            Sharp 图片规范化（含日日新请求副本）、坐标校验、参考主体裁剪合成、框外像素保留；preserveOutsideRegion 分块 yield 减少 OOM
   local-edit.test.mjs       局部编辑的隔离图片处理与 HTTP 集成回归测试
   backup-restore.test.mjs   备份恢复前校验、安全快照与重启信号回归测试
   restore-concurrency.test.mjs 恢复与在途生成互斥的回归测试
@@ -122,12 +148,14 @@ server/
 electron/
   main.cjs                  桌面窗口、原生菜单与本地服务生命周期；运行时将用户数据根目录传给 server/
 mobile/                     Expo React Native 移动端 App「像素变换」（独立 npm 工作区）
-  src/api.ts                移动端唯一 HTTP 封装（动态服务器地址、Bearer 鉴权、缓存下载）
+  src/api.ts                移动端唯一 HTTP 封装（动态服务器地址、Bearer 鉴权、缓存下载、并发限流、断网重试队列）
+  src/labels.ts             集中管理中文标签与时间格式化函数（OPERATION_LABELS/STATUS_LABELS/STAGE_LABELS 等）
   src/sizes.ts              镜像 Web 尺寸目录与主流比例映射（扩图预设用）
   src/theme.tsx             移动端暗色模式 ThemeProvider（light/dark 色板 + AsyncStorage）
-  src/App.tsx               认证守卫与 home / workspace / models 视图切换
+  src/App.tsx               认证守卫与 home / workspace / models 视图切换；注册 setConnectionRetryHandler
   src/screens/              LoginScreen、HomeScreen、WorkspaceScreen 及 workspace/ 下各弹窗
-  src/components/           RectSelector（百分比框选）、ModalSheet、Icon 等
+  src/components/           RectSelector（百分比框选）、ModalSheet（含 KeyboardAvoidingView）、RemoteImage（onError 占位）、Icon 等
+  src/screens/workspace/    HistoryModal、BatchModal、EditTextModal、CompareModal、ProjectFormModal（创建/编辑共用表单）、GalleryModal 等
   android/                  `npx expo prebuild --platform android` 生成后手工调整过的原生工程（见第 1 节构建说明）
 scripts/
   dev.mjs                   并行启动前端和后端

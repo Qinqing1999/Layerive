@@ -1,5 +1,6 @@
-import React, { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, FlatList, Image, Modal, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
+import { RemoteImage } from '../../components/RemoteImage';
 import { api, imageSource } from '../../api';
 import { useTheme } from '../../theme';
 import { fontSize, radius, spacing } from '../../theme';
@@ -31,6 +32,7 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
   const [entries, setEntries] = useState<GalleryEntryItem[] | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [filter, setFilter] = useState<string>('all');
   const [editTarget, setEditTarget] = useState<GalleryEntryItem | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [editPrompt, setEditPrompt] = useState('');
@@ -49,6 +51,14 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
   }, [notify]);
 
   useEffect(() => { void load(); }, [load]);
+
+  const filteredEntries = useMemo(() => {
+    if (!entries) return null;
+    if (filter === 'all') return entries;
+    return entries.filter((e) => (e.category || 'mine') === filter);
+  }, [entries, filter]);
+
+  const FILTERS = [{ key: 'all', label: '全部' }, ...CATEGORIES.map((key) => ({ key, label: CATEGORY_LABELS[key] }))];
 
   async function saveCurrentImage() {
     if (!currentImageId || saving) return;
@@ -113,19 +123,33 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
         {saving ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="gallery" size={16} color={colors.accent} />}
         <Text style={styles.saveText}>收藏当前画布图片（自动提炼提示词）</Text>
       </Pressable>
-      {entries === null ? (
+      <View style={styles.filterRow}>
+        {FILTERS.map((f) => (
+          <Pressable
+            key={f.key}
+            style={[styles.filterChip, filter === f.key && styles.filterChipActive]}
+            onPress={() => setFilter(f.key)}
+          >
+            <Text style={[styles.filterChipText, filter === f.key && styles.filterChipTextActive]}>{f.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {filteredEntries === null ? (
         <View style={styles.loading}><ActivityIndicator size="large" color={colors.accent} /></View>
       ) : (
         <FlatList
-          data={entries}
+          data={filteredEntries}
           keyExtractor={(item: GalleryEntryItem) => item.id}
           contentContainerStyle={styles.list}
+          initialNumToRender={6}
+          maxToRenderPerBatch={6}
+          windowSize={5}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} tintColor={colors.accent} />}
-          ListEmptyComponent={<Text style={styles.empty}>画廊暂无条目</Text>}
+          ListEmptyComponent={<Text style={styles.empty}>{filter === 'all' ? '画廊暂无条目' : '该分类下暂无条目'}</Text>}
           renderItem={({ item }: { item: GalleryEntryItem }) => (
             <View style={styles.card}>
               <Pressable style={styles.cardMain} onPress={() => onUse(item.prompt, item.stylePrompt)}>
-                {item.image ? <Image source={imageSource(item.image, 240)} style={styles.thumb} resizeMode="cover" /> : null}
+                {item.image ? <RemoteImage source={imageSource(item.image, 240)} style={styles.thumb} resizeMode="cover" fallbackLabel="图片加载失败" /> : null}
                 <View style={styles.body}>
                   <View style={styles.cardHead}>
                     <Text style={styles.title} numberOfLines={1}>{item.title}</Text>
@@ -153,7 +177,7 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
 
       {/* Edit Modal */}
       <Modal visible={Boolean(editTarget)} animationType="fade" transparent>
-        <View style={styles.modalOverlay}>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
           <View style={styles.modalCard}>
             <Text style={styles.modalTitle}>编辑画廊条目</Text>
             <Text style={styles.fieldLabel}>标题</Text>
@@ -179,7 +203,7 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
               </Pressable>
             </View>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </View>
   );
@@ -190,6 +214,11 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     container: { flex: 1 },
     saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, margin: spacing.md, padding: spacing.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: c.accent, borderRadius: radius.md },
     saveText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '600' },
+    filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
+    filterChip: { paddingHorizontal: spacing.sm, paddingVertical: 4, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, backgroundColor: c.card },
+    filterChipActive: { backgroundColor: c.accent, borderColor: c.accent },
+    filterChipText: { fontSize: fontSize.xs, color: c.muted },
+    filterChipTextActive: { color: '#fff', fontWeight: '600' },
     loading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
     list: { padding: spacing.md, paddingTop: 0, paddingBottom: spacing.xxl, gap: spacing.sm },
     empty: { textAlign: 'center', color: c.muted, marginTop: spacing.xl },

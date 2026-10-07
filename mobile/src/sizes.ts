@@ -27,7 +27,7 @@ export function sizesForProvider(provider: string | undefined): SizeOption[] {
   return provider === 'sensenova' ? SENSENOVA_SIZES : OPENAI_SIZES;
 }
 
-const MAINSTREAM_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'];
+const MAINSTREAM_RATIOS = ['1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '4:5', '5:4', '21:9', '9:21'];
 
 function optionRatio(option: SizeOption): number {
   const [width, height] = option.value.split('x').map(Number);

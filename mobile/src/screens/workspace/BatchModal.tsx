@@ -1,10 +1,12 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, FlatList, Image, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { RemoteImage } from '../../components/RemoteImage';
 import { api, imageSource } from '../../api';
 import { useTheme } from '../../theme';
 import { fontSize, radius, spacing } from '../../theme';
 import type { BatchEditProgress, ModelConfig } from '../../types';
 import { Icon } from '../../components/Icon';
+import { BATCH_STATUS_LABELS } from '../../labels';
 
 type Props = {
   projectId: string;
@@ -45,6 +47,8 @@ export function BatchModal({ projectId, imageModel, visionModelId, hasCanvasImag
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const taskIdRef = useRef<string | null>(null);
   const finishedRef = useRef(false);
+  const pollStartRef = useRef(0);
+  const pollFailCountRef = useRef(0);
 
   const variables = useMemo(() => parseVariables(template), [template]);
 
@@ -60,16 +64,33 @@ export function BatchModal({ projectId, imageModel, visionModelId, hasCanvasImag
   function startPolling(taskId: string) {
     taskIdRef.current = taskId;
     finishedRef.current = false;
+    pollStartRef.current = Date.now();
+    pollFailCountRef.current = 0;
+    const MAX_POLL_MS = 10 * 60 * 1000;
+    const MAX_FAILS = 5;
     pollRef.current = setInterval(async () => {
+      if (Date.now() - pollStartRef.current > MAX_POLL_MS) {
+        if (pollRef.current) clearInterval(pollRef.current);
+        notify('批量任务轮询超时，请稍后在历史中查看结果', 'error');
+        return;
+      }
       try {
         const data = await api.getBatchEdit(projectId, taskId);
+        pollFailCountRef.current = 0;
         setProgress(data);
         if (data.status !== 'generating' && data.status !== 'queued' && !finishedRef.current) {
           finishedRef.current = true;
           if (pollRef.current) clearInterval(pollRef.current);
           onFinished();
         }
-      } catch { /* keep polling */ }
+      } catch (e) {
+        pollFailCountRef.current += 1;
+        if (pollFailCountRef.current >= MAX_FAILS) {
+          if (pollRef.current) clearInterval(pollRef.current);
+          notify(`轮询失败：${(e as Error).message}`, 'error');
+        }
+        // 否则继续轮询
+      }
     }, 1500);
   }
 
@@ -130,16 +151,30 @@ export function BatchModal({ projectId, imageModel, visionModelId, hasCanvasImag
     } catch (e) { notify((e as Error).message, 'error'); }
   }
 
+  function resetForRetry() {
+    if (pollRef.current) clearInterval(pollRef.current);
+    pollRef.current = null;
+    taskIdRef.current = null;
+    finishedRef.current = false;
+    setProgress(null);
+  }
+
+  async function retry() {
+    resetForRetry();
+    await start();
+  }
+
   if (progress) {
     const total = progress.total;
     const done = progress.completed + progress.failed;
     const ratio = total > 0 ? done / total : 0;
     const images = progress.items.filter((item) => item.image).map((item) => item.image!);
-    const statusLabel: Record<string, string> = { queued: '排队中', generating: '进行中', success: '已完成', partial: '部分完成', failed: '失败', canceled: '已取消' };
+    const isRunning = progress.status === 'generating' || progress.status === 'queued';
+    const canRetry = !isRunning && progress.failed > 0;
     return (
       <View style={styles.progressWrap}>
         <View style={styles.progressHead}>
-          <Text style={styles.progressTitle}>{statusLabel[progress.status] || progress.status}</Text>
+          <Text style={styles.progressTitle}>{BATCH_STATUS_LABELS[progress.status] || progress.status}</Text>
           <Text style={styles.progressCount}>
             {progress.completed}/{total} 张{progress.failed ? ` · 失败 ${progress.failed}` : ''}
           </Text>
@@ -161,20 +196,28 @@ export function BatchModal({ projectId, imageModel, visionModelId, hasCanvasImag
             keyExtractor={(img) => img.id}
             contentContainerStyle={styles.thumbsRow}
             renderItem={({ item }) => (
-              <Image source={imageSource(item.url, 320)} style={styles.thumb} resizeMode="cover" />
+              <RemoteImage source={imageSource(item.url, 320)} style={styles.thumb} resizeMode="cover" fallbackLabel="图片加载失败" />
             )}
           />
         )}
         <View style={styles.progressFooter}>
-          {progress.status === 'generating' || progress.status === 'queued' ? (
+          {isRunning ? (
             <Pressable style={[styles.footerBtn, { backgroundColor: colors.danger }]} onPress={cancel}>
               <Icon name="stop" size={16} color="#fff" />
               <Text style={styles.footerBtnText}>取消任务</Text>
             </Pressable>
           ) : (
-            <Pressable style={[styles.footerBtn, { backgroundColor: colors.accent }]} onPress={onClose}>
-              <Text style={styles.footerBtnText}>完成</Text>
-            </Pressable>
+            <View style={styles.footerRow}>
+              {canRetry ? (
+                <Pressable style={[styles.footerBtn, { backgroundColor: colors.accent }]} onPress={retry}>
+                  <Icon name="rotate" size={16} color="#fff" />
+                  <Text style={styles.footerBtnText}>重试失败项</Text>
+                </Pressable>
+              ) : null}
+              <Pressable style={[styles.footerBtn, { backgroundColor: canRetry ? colors.card : colors.accent, borderWidth: canRetry ? 1 : 0, borderColor: colors.border }]} onPress={onClose}>
+                <Text style={[styles.footerBtnText, canRetry ? { color: colors.text } : null]}>完成</Text>
+              </Pressable>
+            </View>
           )}
         </View>
       </View>
@@ -309,6 +352,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     thumbsRow: { paddingVertical: spacing.md, gap: spacing.sm },
     thumb: { width: 84, height: 84, borderRadius: radius.sm, backgroundColor: c.card },
     progressFooter: { marginTop: 'auto', flexDirection: 'row' },
+    footerRow: { flex: 1, flexDirection: 'row', gap: spacing.sm },
     footerBtn: { flex: 1, height: 46, borderRadius: radius.md, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs },
     footerBtnText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
   });

@@ -42,12 +42,12 @@ try {
   }
 } catch { /* ignore */ }
 async function saveSessions() {
-  await writeFile(SESSIONS_PATH, JSON.stringify([...sessions.entries()].map(([token, session]) => ({ token, ...session }))), 'utf-8').catch(() => {});
+  await writeFile(SESSIONS_PATH, JSON.stringify([...sessions.entries()].map(([token, session]) => ({ token, ...session }))), 'utf-8');
 }
-function createSession(user) {
+async function createSession(user) {
   const token = uid() + uid();
   sessions.set(token, { username: user.username, role: user.role, createdAt: now() });
-  void saveSessions();
+  await saveSessions();
   return token;
 }
 function isValidSession(token) {
@@ -1524,7 +1524,10 @@ async function runGenerationTask(projectId, taskId, context) {
     if (isTimeout && !context.retried) {
       updateTaskInput(taskId, { stage: 'retrying' });
       try {
-        await runGenerationTask(projectId, taskId, { ...context, controller: new AbortController(), retried: true });
+        // 重试用的新 controller 必须登记回 runningTasks，否则 cancel/restore 无法中止重试
+        const retryController = new AbortController();
+        runningTasks.set(taskId, retryController);
+        await runGenerationTask(projectId, taskId, { ...context, controller: retryController, retried: true });
         return;
       } catch (retryError) {
         const retryCanceled = canceledTasks.has(taskId) || (retryError.name === 'AbortError' && !controller.signal.reason?.message?.includes('timeout'));
@@ -2720,6 +2723,10 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const pathname = url.pathname;
   const requestToken = pathname !== '/api/backup/restore' && pathname !== '/api/health' ? Symbol(pathname) : null;
+  // 结构化访问日志：每个请求一个 reqId + 耗时统计
+  const reqId = uid().slice(0, 8);
+  const startedAt = Date.now();
+  const sessionForLog = getSession(getSessionToken(req));
   try {
     if (pathname.startsWith('/api/') || pathname.startsWith('/files/') || pathname.startsWith('/gallery-files/')) assertLocalUiRequest(req);
     if (restoreInProgress && pathname !== '/api/backup/restore' && pathname !== '/api/health') throw restoringError();
@@ -2736,7 +2743,7 @@ const server = http.createServer(async (req, res) => {
         return json(res, 401, { error: '用户名或密码错误' });
       }
       loginFailures.delete(ip);
-      const token = createSession(user);
+      const token = await createSession(user);
       // 公网模式下同时下发 HttpOnly 会话 Cookie：桌面网页的 <img> 请求
       // 无法携带 Authorization 头，浏览器会自动附带 Cookie 完成鉴权
       res.setHeader('Set-Cookie', sessionCookie(token, req));
@@ -2750,7 +2757,7 @@ const server = http.createServer(async (req, res) => {
     }
     if (pathname === '/api/auth/logout' && req.method === 'POST') {
       const token = getBearerToken(req) || parseCookieHeader(req.headers.cookie)[SESSION_COOKIE] || '';
-      if (token) { sessions.delete(token); void saveSessions(); }
+      if (token) { sessions.delete(token); await saveSessions(); }
       res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0`);
       return json(res, 200, { ok: true });
     }
@@ -3027,6 +3034,12 @@ const server = http.createServer(async (req, res) => {
     return json(res, error.status || 500, payload);
   } finally {
     finishServiceRequest(requestToken);
+    const duration = Date.now() - startedAt;
+    const username = sessionForLog?.username || 'guest';
+    res.on('finish', () => {
+      const status = res.statusCode;
+      console.log(JSON.stringify({ ts: new Date().toISOString(), reqId, method: req.method, pathname, status, user: username, ms: duration }));
+    });
   }
 });
 
@@ -3041,28 +3054,58 @@ server.listen(PORT, HOST, () => {
   // 启动时清理孤儿临时文件
   void cleanupOrphanFiles();
   // 每日定时清理
-  setInterval(() => void cleanupOrphanFiles(), 24 * 60 * 60 * 1000);
+  setInterval(() => void cleanupOrphanFiles(), 24 * 60 * 60 * 1000).unref();
+  // 僵尸任务扫描：60s 一次，核对 DB 中 generating 任务是否仍存在于内存 runningTasks
+  setInterval(() => {
+    try {
+      const stale = db.prepare(
+        "SELECT id, started_at FROM generation_tasks WHERE status = 'generating' AND started_at IS NOT NULL"
+      ).all();
+      const nowMs = Date.now();
+      for (const row of stale) {
+        // 内存里没有对应 entry，说明任务在事件循环中丢失，标记为 failed
+        if (!runningTasks.has(row.id)) {
+          db.prepare("UPDATE generation_tasks SET status = 'failed', error_json = ?, finished_at = ? WHERE id = ?")
+            .run(JSON.stringify({ message: '任务在内存中已丢失，已标记为失败，请重新发送。' }), now(), row.id);
+        }
+      }
+    } catch (e) {
+      console.error('僵尸任务扫描失败：', e.message);
+    }
+  }, 60_000).unref();
 });
 
 /** 清理孤儿临时文件：扫描 temp/、extracts/、local-edits/ 中的孤儿文件 */
 async function cleanupOrphanFiles() {
   try {
     const knownPaths = new Set(db.prepare('SELECT file_path FROM images').all().map((r) => r.file_path).filter(Boolean));
+    // 活跃项目（有 generating/queued 任务）跳过清理，避免误删运行中任务的中间产物
+    const activeProjects = new Set(
+      db.prepare("SELECT DISTINCT project_id FROM generation_tasks WHERE status IN ('generating', 'queued')")
+        .all().map((r) => r.project_id)
+    );
     const projectsDir = PROJECTS_ROOT;
+    const nowMs = Date.now();
     await readdir(projectsDir, { withFileTypes: true }).then(async (entries) => {
       for (const entry of entries) {
         if (!entry.isDirectory()) continue;
         const projectId = entry.name;
+        if (activeProjects.has(projectId)) continue; // 跳过活跃项目
         for (const sub of ['temp', 'extracts', 'local-edits']) {
           const dir = path.join(projectsDir, projectId, sub);
           try {
             const files = await readdir(dir);
             for (const file of files) {
               const filePath = path.join(projectId, sub, file);
-              // temp/ 目录的文件全部清理（本来就是临时的）
-              // extracts/ 和 local-edits/ 的文件如果不在 images 表中则清理
-              if (sub === 'temp' || !knownPaths.has(filePath)) {
-                await unlink(path.join(dir, file)).catch(() => {});
+              const fullPath = path.join(dir, file);
+              if (sub === 'temp') {
+                // temp/ 仅清理 mtime 超过 2 小时的文件，给运行中任务留缓冲
+                let stat;
+                try { stat = statSync(fullPath); } catch { continue; }
+                if (nowMs - stat.mtimeMs < 2 * 60 * 60 * 1000) continue;
+                await unlink(fullPath).catch(() => {});
+              } else if (!knownPaths.has(filePath)) {
+                await unlink(fullPath).catch(() => {});
               }
             }
           } catch { /* 目录不存在 */ }

@@ -14,6 +14,33 @@ export function setSessionExpiredHandler(handler: (() => void) | null) {
   sessionExpiredHandler = handler;
 }
 
+/** 网络连接状态通知（断网时 App 显示持久横幅） */
+let onlineState = true;
+let connectionChangeHandler: ((online: boolean) => void) | null = null;
+export function setConnectionChangeHandler(handler: ((online: boolean) => void) | null) {
+  connectionChangeHandler = handler;
+}
+export function isOnline() { return onlineState; }
+
+/** 网络断开期间失败的幂等 GET 请求队列，网络恢复后自动重试 */
+type PendingRetry = { fn: () => Promise<void>; };
+const pendingRetryQueue: PendingRetry[] = [];
+
+function markOffline() {
+  if (onlineState) { onlineState = false; connectionChangeHandler?.(false); }
+}
+function markOnline() {
+  if (!onlineState) {
+    onlineState = true;
+    connectionChangeHandler?.(true);
+    // 网络恢复后逐个重放幂等请求队列（不阻塞 UI）
+    const queue = pendingRetryQueue.splice(0);
+    for (const item of queue) {
+      item.fn().catch(() => { /* 重放失败不再入队，避免无限循环 */ });
+    }
+  }
+}
+
 export async function setAuthToken(token: string) {
   authToken = token;
   await AsyncStorage.setItem(AUTH_TOKEN_KEY, token);
@@ -58,7 +85,78 @@ export function authHeaders(): Record<string, string> {
 /** 防止 401 并发时多次触发 sessionExpiredHandler */
 let sessionExpiredFiring = false;
 
+/** 全局并发请求限流：避免连点/批量操作时短时间内并发过多请求压垮本地服务端 */
+const MAX_CONCURRENCY = 6;
+let inflightCount = 0;
+const waitQueue: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (inflightCount < MAX_CONCURRENCY) {
+    inflightCount++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    waitQueue.push(() => { inflightCount++; resolve(); });
+  });
+}
+
+function releaseSlot() {
+  const next = waitQueue.shift();
+  if (next) {
+    next();
+  } else {
+    inflightCount = Math.max(0, inflightCount - 1);
+  }
+}
+
 async function request<T>(path: string, init?: { method?: string; body?: unknown; headers?: Record<string, string> }): Promise<T> {
+  const method = init?.method || 'GET';
+  // GET 等幂等请求失败可自动重试，POST/PATCH/DELETE 不自动重试（避免重复写入）
+  const isIdempotent = method === 'GET';
+  const maxRetries = isIdempotent ? 2 : 0;
+  let lastError: Error = new Error('请求失败');
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    await acquireSlot();
+    try {
+      const result = await fetchOnce<T>(path, init);
+      return result;
+    } catch (e) {
+      lastError = e as Error;
+      const isNetworkError = !(e as any)?.status; // 网络错误无 status，HTTP 错误带 status
+      const is429 = (e as any)?.status === 429;
+      if (attempt < maxRetries && (isNetworkError || is429)) {
+        // 指数退避：500ms, 1500ms
+        await new Promise((r) => setTimeout(r, 500 * Math.pow(3, attempt)));
+        continue;
+      }
+      // 断网期间幂等 GET 失败：登记到重试队列，网络恢复后自动重放（不阻塞当前调用）
+      if (isIdempotent && isNetworkError && !onlineState) {
+        pendingRetryQueue.push({
+          fn: async () => {
+            try {
+              const data = await fetchOnce<T>(path, init);
+              connectionRetryHandler?.(path, data);
+            } catch { /* 重放失败不再入队，避免无限循环 */ }
+          },
+        });
+        // 队列上限 20，避免无限堆积
+        if (pendingRetryQueue.length > 20) pendingRetryQueue.splice(0, pendingRetryQueue.length - 20);
+      }
+      throw e;
+    } finally {
+      releaseSlot();
+    }
+  }
+  throw lastError;
+}
+
+/** 网络恢复后重试成功的回调，由 App.tsx 注册以刷新当前视图 */
+let connectionRetryHandler: ((path: string, data: unknown) => void) | null = null;
+export function setConnectionRetryHandler(handler: ((path: string, data: unknown) => void) | null) {
+  connectionRetryHandler = handler;
+}
+
+async function fetchOnce<T>(path: string, init?: { method?: string; body?: unknown; headers?: Record<string, string> }): Promise<T> {
   const token = await getAuthToken();
   const headers: Record<string, string> = { ...init?.headers };
   if (init?.body !== undefined) headers['Content-Type'] = 'application/json';
@@ -77,8 +175,10 @@ async function request<T>(path: string, init?: { method?: string; body?: unknown
     });
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
+      markOffline();
       throw new Error('请求超时，请检查网络连接');
     }
+    markOffline();
     throw new Error(`网络请求失败：${(e as Error).message}`);
   } finally {
     clearTimeout(timer);
@@ -94,7 +194,13 @@ async function request<T>(path: string, init?: { method?: string; body?: unknown
     }
     throw new Error('登录已过期，请重新登录');
   }
-  if (!response.ok) throw new Error((payload as { error?: string }).error || `请求失败（${response.status}）`);
+  if (!response.ok) {
+    // 429 标记 status 让上层重试
+    const err = new Error((payload as { error?: string }).error || `请求失败（${response.status}）`) as Error & { status?: number };
+    err.status = response.status;
+    throw err;
+  }
+  markOnline();
   return payload as T;
 }
 

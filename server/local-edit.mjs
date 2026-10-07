@@ -158,13 +158,16 @@ export async function preserveOutsideRegion(source, output, rect) {
   const generated = await sharp(output.bytes, decodeOptions).autoOrient().toColourspace('srgb')
     .resize(width, height, { fit: 'fill' }).ensureAlpha().raw().toBuffer();
   const feather = Math.max(1, Math.min(12, Math.round(Math.min(region.width, region.height) * 0.025)));
+  // 分块处理：每 64 行 yield 一次，让 event loop 有机会 GC，避免大图阻塞
   for (let y = 0; y < region.height; y++) {
+    if (y % 64 === 0) await new Promise((r) => setImmediate(r));
     for (let x = 0; x < region.width; x++) {
       const weight = Math.min(1, (Math.min(x, y, region.width - 1 - x, region.height - 1 - y) + 1) / feather);
       const offset = ((region.top + y) * width + region.left + x) * 4;
       for (let c = 0; c < 4; c++) original[offset + c] = Math.round(original[offset + c] * (1 - weight) + generated[offset + c] * weight);
     }
   }
+  // 编码完成后立即释放 generated 引用，让 GC 回收
   const bytes = await sharp(original, { raw: { width, height, channels: 4 } }).png().toBuffer();
   return { bytes, mimeType: 'image/png', width, height };
 }

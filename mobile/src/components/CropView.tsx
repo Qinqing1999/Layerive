@@ -36,6 +36,8 @@ type DragRect = { x: number; y: number; width: number; height: number };
 
 /** 选区有效性阈值：与工作台「局部」框选一致（占比 ≥2%） */
 const MIN_PERCENT = 2;
+/** 选区最小像素阈值：避免原图过小时裁剪出几乎无内容的图（与服务端 256px 输入限制留余量） */
+const MIN_PIXELS = 32;
 /** 缩放范围 */
 const ZOOM_MIN = 1;
 const ZOOM_MAX = 5;
@@ -231,7 +233,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
     offsetRef.current = { x: 0, y: 0 };
   }
 
-  // 选区有效性（与「局部」一致：≥2% × ≥2%）
+  // 选区有效性（与「局部」一致：≥2% × ≥2%；同时要求像素 ≥32 以避免原图过小时裁剪无效）
   const percent = useMemo(() => {
     if (!dragRect || !display || display.w < 1 || display.h < 1) return null;
     return {
@@ -239,7 +241,14 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
       h: (dragRect.height / display.h) * 100,
     };
   }, [dragRect, display]);
-  const valid = !!percent && percent.w >= MIN_PERCENT && percent.h >= MIN_PERCENT;
+  const pixelSize = useMemo(() => {
+    if (!dragRect || !display || !imgSize || display.w < 1 || display.h < 1) return null;
+    const sx = imgSize.w / display.w;
+    const sy = imgSize.h / display.h;
+    return { w: dragRect.width * sx, h: dragRect.height * sy };
+  }, [dragRect, display, imgSize]);
+  const valid = !!percent && percent.w >= MIN_PERCENT && percent.h >= MIN_PERCENT
+    && !!pixelSize && pixelSize.w >= MIN_PIXELS && pixelSize.h >= MIN_PIXELS;
 
   async function confirmCrop() {
     if (!imgSize || !display || !dragRect || !valid || busy || !normalizedUri) return;
@@ -414,7 +423,11 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
             </Pressable>
           </View>
           <Text style={styles.sizeText}>
-            {valid && percent ? `${percent.w.toFixed(0)}% × ${percent.h.toFixed(0)}%` : '拖拽框选裁剪范围'}
+            {valid && percent && pixelSize
+              ? `${percent.w.toFixed(0)}% × ${percent.h.toFixed(0)}% · ${Math.round(pixelSize.w)}×${Math.round(pixelSize.h)}px`
+              : dragRect
+                ? '选区过小，至少 2% × 2% 且 ≥32px'
+                : '拖拽框选裁剪范围'}
           </Text>
           <Pressable
             style={[styles.footerBtn, (!valid || busy) && { opacity: 0.4 }]}

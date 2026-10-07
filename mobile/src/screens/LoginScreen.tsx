@@ -21,9 +21,13 @@ export function LoginScreen({ onSuccess, notify }: Props) {
   const [showServer, setShowServer] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [formError, setFormError] = useState<string | null>(null);
 
   async function submit() {
-    if (loading || !password || !username.trim()) return;
+    if (loading) return;
+    if (!username.trim()) { setFormError('请输入用户名'); return; }
+    if (!password) { setFormError('请输入密码'); return; }
+    setFormError(null);
     setLoading(true);
     try {
       const trimmed = server.trim();
@@ -32,6 +36,7 @@ export function LoginScreen({ onSuccess, notify }: Props) {
       await setAuthToken(result.token);
       onSuccess();
     } catch (error) {
+      setFormError((error as Error).message);
       notify((error as Error).message, 'error');
     } finally {
       setLoading(false);
@@ -112,10 +117,13 @@ export function LoginScreen({ onSuccess, notify }: Props) {
           <Pressable
             style={({ pressed }) => [styles.button, (loading || !password || !username.trim()) && { opacity: 0.5 }, pressed && { opacity: 0.85 }]}
             onPress={submit}
-            disabled={loading || !password || !username.trim()}
+            disabled={loading}
           >
             {loading ? <ActivityIndicator color="#fff" /> : <Text style={styles.buttonText}>登录</Text>}
           </Pressable>
+          {formError ? (
+            <Text style={styles.formError}>{formError}</Text>
+          ) : null}
         </View>
       </View>
     </KeyboardAvoidingView>
@@ -140,4 +148,5 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     hint: { fontSize: 10, color: c.muted, marginTop: spacing.xs },
     button: { height: 46, borderRadius: radius.sm, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', marginTop: spacing.sm },
     buttonText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
+    formError: { fontSize: fontSize.sm, color: c.danger, textAlign: 'center', marginTop: spacing.sm },
   });
