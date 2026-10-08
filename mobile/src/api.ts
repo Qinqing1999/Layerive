@@ -77,6 +77,17 @@ export async function setServerBase(url: string | null) {
   else await AsyncStorage.removeItem(SERVER_BASE_KEY);
 }
 
+/** 轻 ping 检测服务器可达性（无需鉴权） */
+export async function pingServer(base?: string): Promise<boolean> {
+  const url = (base ?? currentBase)?.replace(/\/+$/, '') + '/api/health';
+  try {
+    const res = await fetch(url, { method: 'GET', signal: AbortSignal.timeout(5000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 /** Authorization header value for Image sources and downloads. */
 export function authHeaders(): Record<string, string> {
   return authToken ? { Authorization: `Bearer ${authToken}` } : {};
@@ -236,6 +247,9 @@ export const api = {
     request<GenerateResult>(`/api/projects/${id}/generate`, { method: 'POST', body: input }),
 
   listGeneratingTasks: (id: string) => request<{ tasks: GenerationTask[] }>(`/api/projects/${id}/tasks`),
+
+  /** 拉取最近 30 天所有任务（含已完成/失败/取消），按 createdAt DESC */
+  listAllTasks: (id: string) => request<{ tasks: GenerationTask[] }>(`/api/projects/${id}/tasks?all=1`),
 
   getTask: (id: string, taskId: string) => request<GenerationTask>(`/api/projects/${id}/tasks/${taskId}`),
 

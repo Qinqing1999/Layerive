@@ -9,9 +9,13 @@ import { Icon } from '../components/Icon';
 type Props = {
   onSuccess: (username: string, role: 'admin' | 'user') => void;
   notify: (message: string, kind?: 'success' | 'error') => void;
+  /** 服务器连通状态：null=检测中，false=不可达，true=可达 */
+  serverReachable?: boolean | null;
+  /** 重新检测服务器连通性 */
+  onRecheckServer?: () => Promise<void> | void;
 };
 
-export function LoginScreen({ onSuccess, notify }: Props) {
+export function LoginScreen({ onSuccess, notify, serverReachable, onRecheckServer }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const insets = useSafeAreaInsets();
@@ -125,6 +129,15 @@ export function LoginScreen({ onSuccess, notify }: Props) {
             <Text style={styles.formError}>{formError}</Text>
           ) : null}
         </View>
+        {serverReachable === false ? (
+          <View style={styles.serverWarn}>
+            <Icon name="warning" size={14} color="#b45309" />
+            <Text style={styles.serverWarnText}>服务器不可达，请检查地址或网络</Text>
+            <Pressable hitSlop={6} onPress={() => void onRecheckServer?.()}>
+              <Text style={styles.serverRetry}>重试</Text>
+            </Pressable>
+          </View>
+        ) : null}
       </View>
     </KeyboardAvoidingView>
   );
@@ -149,4 +162,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     button: { height: 46, borderRadius: radius.sm, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center', marginTop: spacing.sm },
     buttonText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
     formError: { fontSize: fontSize.sm, color: c.danger, textAlign: 'center', marginTop: spacing.sm },
+    serverWarn: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.md, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: '#fef3c7', borderRadius: radius.sm, borderWidth: 1, borderColor: '#fde68a' },
+    serverWarnText: { flex: 1, fontSize: fontSize.xs, color: '#b45309' },
+    serverRetry: { fontSize: fontSize.xs, fontWeight: '700', color: '#b45309', paddingHorizontal: spacing.xs },
   });

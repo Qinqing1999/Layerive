@@ -39,6 +39,7 @@ import { CompareModal } from './workspace/CompareModal';
 import { EditTextModal } from './workspace/EditTextModal';
 import { BatchModal } from './workspace/BatchModal';
 import { GalleryModal } from './workspace/GalleryModal';
+import { TaskHistorySheet } from './workspace/TaskHistorySheet';
 
 type Props = {
   projectId: string;
@@ -49,7 +50,7 @@ type Props = {
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
-type SheetName = 'tasks' | 'history' | 'compare' | 'editText' | 'batch' | 'gallery' | 'localEdit' | 'outpaint' | 'extractHint' | 'size' | null;
+type SheetName = 'tasks' | 'history' | 'compare' | 'editText' | 'batch' | 'gallery' | 'localEdit' | 'outpaint' | 'extractHint' | 'size' | 'taskHistory' | null;
 type SelectMode = 'localEdit' | 'extract' | null;
 type WorkspaceTab = 'canvas' | 'chat' | 'history';
 
@@ -1388,7 +1389,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             showsHorizontalScrollIndicator={false}
           >
             <ToolBtn icon="compare" label="对比" colors={colors} disabled={!parentImage} onPress={() => setSheet('compare')} />
-            <ToolBtn icon="crop" label="比例" colors={colors} active={Boolean(genSizeEffective)} onPress={() => setSheet('size')} />
+            <ToolBtn icon="crop" label={genSizeEffective?.label ?? '比例'} colors={colors} active={Boolean(genSizeEffective)} onPress={() => setSheet('size')} />
             <ToolBtn icon="rotate" label="旋转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('rotate90')} />
             <ToolBtn icon="flipH" label="翻转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('flipH')} />
             <ToolBtn icon="undo" label="撤销" colors={colors} disabled={!undoStack.length} onPress={undoTransform} />
@@ -1488,7 +1489,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
                 </View>
               </View>
             ) : null}
-            {/* 数量/比例/批量创作：常驻显示，展开风格编辑器时由消息列表自动让位 */}
+            {/* 数量/比例/批量创作/任务记录：常驻显示，展开风格编辑器时由消息列表自动让位 */}
             <View style={styles.countRow}>
               <CountSelect value={count} onChange={setCount} colors={colors} />
               <Pressable style={[styles.batchPill, genSizeEffective && { borderColor: colors.accent }]} onPress={() => setSheet('size')}>
@@ -1498,6 +1499,10 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
               <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
                 <Icon name="batch" size={13} color={colors.accent} />
                 <Text style={styles.batchPillText}>批量创作</Text>
+              </Pressable>
+              <Pressable style={styles.batchPill} onPress={() => setSheet('taskHistory')}>
+                <Icon name="history" size={13} color={colors.accent} />
+                <Text style={styles.batchPillText}>任务记录</Text>
               </Pressable>
             </View>
             {/* 项目风格提示词：可折叠，内容存入 draft，服务端文生图时自动拼接到 prompt */}
@@ -1902,6 +1907,14 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         </ScrollView>
       </ModalSheet>
 
+      {/* 任务记录：最近 30 天所有任务（含完成/失败/取消） */}
+      <TaskHistorySheet
+        projectId={projectId}
+        visible={sheet === 'taskHistory'}
+        onClose={() => setSheet(null)}
+        notify={notify}
+      />
+
       {/* Extract hint sheet */}
       <ModalSheet
         visible={sheet === 'extractHint'}
@@ -2147,9 +2160,19 @@ function MessageBubble({ message, imagesById, colors, onImagePress }: { message:
   const outputImages = (message.content.outputImageIds || [])
     .map((id) => imagesById.get(id))
     .filter((img): img is ProjectImage => Boolean(img && img.fileSize > 0));
+  // 用户消息引用的输入图（上传/画布图）：以小缩略图形式展示在气泡内
+  const inputImage = message.content.inputImageId ? imagesById.get(message.content.inputImageId) : null;
+  const inputImg = inputImage && inputImage.fileSize > 0 ? inputImage : null;
 
   return (
     <View style={[bubbleStyles.msgBubble, isUser ? { alignSelf: 'flex-end', backgroundColor: colors.accent } : isSystem ? bubbleStyles.msgSystem : { backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border }]}>
+      {inputImg ? (
+        <View style={bubbleStyles.msgImages}>
+          <Pressable onPress={() => onImagePress(inputImg)}>
+            <RemoteImage source={imageSource(inputImg.url, 320)} style={bubbleStyles.msgImage} resizeMode="cover" fallbackLabel="图片加载失败" />
+          </Pressable>
+        </View>
+      ) : null}
       <Text style={[bubbleStyles.msgText, { color: isUser ? '#fff' : isSystem ? colors.danger : colors.text }]}>{text}</Text>
       {outputImages.length > 0 && (
         <View style={bubbleStyles.msgImages}>
@@ -2219,7 +2242,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     chatList: { flex: 1, backgroundColor: c.bg },
     chatListContent: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.lg },
     historyPage: { flex: 1, backgroundColor: c.bg },
-    countRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingBottom: spacing.sm },
+    countRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: spacing.xs, paddingBottom: spacing.sm },
     canvasHint: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm, padding: spacing.sm, borderRadius: radius.md, backgroundColor: `${c.accent}14`, borderWidth: 1, borderColor: `${c.accent}33` },
     canvasHintThumb: { width: 44, height: 44, borderRadius: radius.sm, backgroundColor: c.bg },
     canvasHintTextWrap: { flex: 1, gap: 2 },
@@ -2235,7 +2258,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
     actionBtnDisabled: { opacity: 0.4 },
     actionText: { fontSize: fontSize.xs, color: c.textSecondary, fontWeight: '500' },
-    batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
+    batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, flexShrink: 1 },
     batchPillText: { color: c.accent, fontSize: fontSize.xs, fontWeight: '700' },
     styleToggle: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingBottom: spacing.xs },
     styleToggleText: { fontSize: fontSize.xs, color: c.muted, fontWeight: '600' },

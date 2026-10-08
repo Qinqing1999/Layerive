@@ -15,7 +15,7 @@ import { composeLocalReference, normalizeLocalImage, normalizeSenseNovaInput, pr
 const PORT = Number(process.env.PIXELFLOW_API_PORT || 8788);
 // Loopback by default. PIXELFLOW_API_HOST=0.0.0.0 opts in to LAN access for the
 // mobile app; every /api route still requires a valid session token.
-const HOST = process.env.PIXELFLOW_API_HOST || '127.0.0.1';
+const HOST = process.env.PIXELFLOW_API_HOST || '0.0.0.0';
 // PIXELFLOW_PUBLIC=1 部署到公网（云服务器/反向代理/隧道）时开启：
 // - 放宽「仅本机」Host 守卫，允许任意域名访问（鉴权仍由 Bearer 头 / 会话 Cookie 把关）
 // - 登录成功时下发 HttpOnly 会话 Cookie（桌面网页的 <img> 无法携带 Authorization 头）
@@ -2234,20 +2234,42 @@ async function exportVersionImagesZip(projectId, versionId) {
   return { buffer: createZip(entries), versionNumber: version.version_number, imageCount: entries.length };
 }
 
-function listGeneratingTasks(projectId) {
+function listGeneratingTasks(projectId, all = false) {
   projectOrThrow(projectId);
-  return db.prepare(`
-    SELECT id, status, operation_type, created_at, started_at
-    FROM generation_tasks
-    WHERE project_id = ? AND status IN ('generating', 'queued')
-    ORDER BY COALESCE(started_at, created_at) DESC
-  `).all(projectId).map((task) => ({
-    id: task.id,
-    status: task.status,
-    operationType: task.operation_type,
-    createdAt: task.created_at,
-    startedAt: task.started_at,
-  }));
+  const sql = all
+    ? db.prepare(`
+        SELECT id, status, operation_type, created_at, started_at, finished_at, error_json
+        FROM generation_tasks
+        WHERE project_id = ?
+          AND created_at >= datetime('now', '-30 days')
+        ORDER BY created_at DESC
+        LIMIT 100
+      `)
+    : db.prepare(`
+        SELECT id, status, operation_type, created_at, started_at
+        FROM generation_tasks
+        WHERE project_id = ? AND status IN ('generating', 'queued')
+        ORDER BY COALESCE(started_at, created_at) DESC
+      `);
+  return sql.all(projectId).map((task) => {
+    const base = {
+      id: task.id,
+      status: task.status,
+      operationType: task.operation_type,
+      createdAt: task.created_at,
+      startedAt: task.started_at,
+    };
+    if (all) {
+      base.finishedAt = task.finished_at;
+      if (task.error_json) {
+        try { base.error = JSON.parse(task.error_json).message || null; }
+        catch { base.error = String(task.error_json); }
+      } else {
+        base.error = null;
+      }
+    }
+    return base;
+  });
 }
 
 // ---- Project duplicate ------------------------------------------------------
@@ -2744,7 +2766,8 @@ const server = http.createServer(async (req, res) => {
   const startedAt = Date.now();
   const sessionForLog = getSession(getSessionToken(req));
   try {
-    if (pathname.startsWith('/api/') || pathname.startsWith('/files/') || pathname.startsWith('/gallery-files/')) assertLocalUiRequest(req);
+    const isPublicEndpoint = pathname === '/api/health' || pathname === '/api/auth/login' || pathname === '/api/auth/setup' || pathname === '/api/auth/status';
+    if (!isPublicEndpoint && (pathname.startsWith('/api/') || pathname.startsWith('/files/') || pathname.startsWith('/gallery-files/'))) assertLocalUiRequest(req);
     if (restoreInProgress && pathname !== '/api/backup/restore' && pathname !== '/api/health') throw restoringError();
 
     // Auth endpoints (no session required)
@@ -2913,6 +2936,8 @@ const server = http.createServer(async (req, res) => {
         VALUES (?, ?, 'upload', ?, ?, ?, ?, ?, ?)`)
         .run(imageId, projectId, relative, finalMime, dimensions.width, dimensions.height, finalBytes.length, now());
       db.prepare('UPDATE projects SET current_image_id = ?, updated_at = ? WHERE id = ?').run(imageId, now(), projectId);
+      // 上传即建 upload 版本，让原图在版本树/历史中可见（与编辑生成统一）
+      ensureUploadVersion(projectId, { id: imageId, project_id: projectId, source_type: 'upload', version_id: null, created_at: now() });
       return json(res, 201, bundle(projectId));
     }
 
@@ -2942,7 +2967,10 @@ const server = http.createServer(async (req, res) => {
     if (localEditBatchMatch && req.method === 'POST') return json(res, 202, startLocalEditBatch(localEditBatchMatch[1], await body(req)));
 
     const tasksMatch = pathname.match(/^\/api\/projects\/([^/]+)\/tasks$/);
-    if (tasksMatch && req.method === 'GET') return json(res, 200, { tasks: listGeneratingTasks(tasksMatch[1]) });
+    if (tasksMatch && req.method === 'GET') {
+      const all = new URL(req.url, 'http://x').searchParams.get('all') === '1';
+      return json(res, 200, { tasks: listGeneratingTasks(tasksMatch[1], all) });
+    }
     const taskMatch = pathname.match(/^\/api\/projects\/([^/]+)\/tasks\/([^/]+)$/);
     if (taskMatch && req.method === 'GET') {
       const task = db.prepare('SELECT * FROM generation_tasks WHERE id = ? AND project_id = ?').get(taskMatch[2], taskMatch[1]);

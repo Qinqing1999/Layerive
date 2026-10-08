@@ -2,7 +2,7 @@ import React, { Component, useCallback, useEffect, useRef, useState, type ReactN
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler, setConnectionChangeHandler, setConnectionRetryHandler } from './api';
+import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler, setConnectionChangeHandler, setConnectionRetryHandler, pingServer } from './api';
 import { ThemeProvider, useTheme } from './theme';
 import { fontSize, radius, spacing } from './theme';
 import type { ModelConfig, Project } from './types';
@@ -31,6 +31,7 @@ function AppShell() {
   const [offline, setOffline] = useState(false);
   const [userRole, setUserRole] = useState<string>('user');
   const [username, setUsername] = useState('');
+  const [serverReachable, setServerReachable] = useState<boolean | null>(null);
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => {
@@ -57,6 +58,8 @@ function AppShell() {
   useEffect(() => {
     (async () => {
       await initServerBase();
+      const reachable = await pingServer();
+      setServerReachable(reachable);
       const token = await getAuthToken();
       if (!token) { setAuthState('guest'); return; }
       try {
@@ -68,6 +71,12 @@ function AppShell() {
       }
     })();
   }, [loadAll]);
+
+  const recheckServer = useCallback(async () => {
+    setServerReachable(null);
+    const reachable = await pingServer();
+    setServerReachable(reachable);
+  }, []);
 
   // 会话过期（401）时自动回到登录页
   useEffect(() => {
@@ -127,7 +136,7 @@ function AppShell() {
     return (
       <View style={styles.root}>
         <StatusBar style={mode === 'dark' ? 'light' : 'dark'} />
-        <LoginScreen onSuccess={onLoginSuccess} notify={notify} />
+        <LoginScreen onSuccess={onLoginSuccess} notify={notify} serverReachable={serverReachable} onRecheckServer={recheckServer} />
         {offline && <OfflineBanner colors={colors} />}
         {toast && <ToastView toast={toast} colors={colors} />}
       </View>
