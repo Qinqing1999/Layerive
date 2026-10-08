@@ -94,6 +94,13 @@ const OUT_SCALES: { value: number; label: string }[] = [
   { value: 0.5, label: '+50%' },
   { value: 1, label: '+100%' },
 ];
+// 生成比例选项：覆盖主流画幅，提交时映射到当前模型支持的最近档位
+const GEN_RATIOS = ['1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3', '4:5', '5:4', '21:9', '9:21'];
+
+function ratioToSize(provider: string | undefined, ratio: string): string {
+  const [w, h] = ratio.split(':').map(Number);
+  return closestSizeForDimensions(provider, w, h);
+}
 
 const SELECT_HINTS: Record<'localEdit' | 'extract', string> = {
   localEdit: '在图片上拖拽框选要修改的区域',
@@ -625,7 +632,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     // 提交前固化输入，失败重试时沿用当时的画布图与父版本
     const input: Record<string, unknown> = {
       prompt: prompt.trim(),
-      params: { count, ...(genSize ? { size: genSize.value } : {}) },
+      params: { count, ...(genSizeEffective ? { size: genSizeEffective.value } : {}) },
       visionModelId: activeVisionModel,
     };
     if (currentImage) input.imageId = currentImage.id;
@@ -717,6 +724,11 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   function originalSizeFor(image: ProjectImage | null) {
     return closestSizeForDimensions(imageModel?.provider, image?.width, image?.height);
   }
+
+  /** 生成尺寸生效值：显式选择 > 画布原图比例 > null（不传 size，跟随模型默认） */
+  const genSizeEffective = genSize ?? (currentImage?.width && currentImage?.height
+    ? { value: originalSizeFor(currentImage), label: '原比例' }
+    : null);
 
   /** 扩图目标尺寸与预览布局：按方向+幅度计算理想画布，再映射到模型支持的档位 */
   const outpaintPlan = useMemo(() => {
@@ -1332,6 +1344,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             showsHorizontalScrollIndicator={false}
           >
             <ToolBtn icon="compare" label="对比" colors={colors} disabled={!parentImage} onPress={() => setSheet('compare')} />
+            <ToolBtn icon="crop" label="比例" colors={colors} active={Boolean(genSizeEffective)} onPress={() => setSheet('size')} />
             <ToolBtn icon="rotate" label="旋转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('rotate90')} />
             <ToolBtn icon="flipH" label="翻转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('flipH')} />
             <ToolBtn icon="undo" label="撤销" colors={colors} disabled={!undoStack.length} onPress={undoTransform} />
@@ -1431,20 +1444,18 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
                 </View>
               </View>
             ) : null}
-            {/* 数量/批量创作：风格编辑器展开时隐藏，为输入区腾出空间 */}
-            {!showStylePrompt && (
-              <View style={styles.countRow}>
-                <CountSelect value={count} onChange={setCount} colors={colors} />
-                <Pressable style={styles.batchPill} onPress={() => setSheet('size')}>
-                  <Icon name="crop" size={13} color={colors.accent} />
-                  <Text style={styles.batchPillText}>{genSize ? `${genSize.label} ${genSize.value}` : '比例'}</Text>
-                </Pressable>
-                <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
-                  <Icon name="batch" size={13} color={colors.accent} />
-                  <Text style={styles.batchPillText}>批量创作</Text>
-                </Pressable>
-              </View>
-            )}
+            {/* 数量/比例/批量创作：常驻显示，展开风格编辑器时由消息列表自动让位 */}
+            <View style={styles.countRow}>
+              <CountSelect value={count} onChange={setCount} colors={colors} />
+              <Pressable style={[styles.batchPill, genSizeEffective && { borderColor: colors.accent }]} onPress={() => setSheet('size')}>
+                <Icon name="crop" size={13} color={colors.accent} />
+                <Text style={styles.batchPillText} numberOfLines={1}>{genSizeEffective ? `${genSizeEffective.label} ${genSizeEffective.value}` : '比例'}</Text>
+              </Pressable>
+              <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
+                <Icon name="batch" size={13} color={colors.accent} />
+                <Text style={styles.batchPillText}>批量创作</Text>
+              </Pressable>
+            </View>
             {/* 项目风格提示词：可折叠，内容存入 draft，服务端文生图时自动拼接到 prompt */}
             <Pressable style={styles.styleToggle} onPress={() => setShowStylePrompt((v) => !v)}>
               <Icon name={showStylePrompt ? 'chevronDown' : 'chevronRight'} size={12} color={colors.muted} />
@@ -1724,7 +1735,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           </Pressable>
         }
       >
-        <View style={styles.padBody}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.padBody} showsVerticalScrollIndicator={false}>
           {/* 扩展方向 */}
           <Text style={styles.fieldLabel}>扩展方向</Text>
           <View style={styles.miniChipRow}>
@@ -1786,24 +1797,33 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
               </Pressable>
             ))}
           </View>
-        </View>
+        </ScrollView>
       </ModalSheet>
 
-      {/* Generation size sheet：常用比例 / 原图比例 / 自定义宽高 */}
+      {/* Generation size sheet：原比例 / 主流画幅 / 自定义宽高 */}
       <ModalSheet visible={sheet === 'size'} title="生成比例" onClose={() => setSheet(null)}>
-        <View style={styles.padBody}>
-          <Text style={styles.fieldLabel}>选择后，本次会话中的生成（文生图/改图）将使用该尺寸；不选择则跟随模型默认。</Text>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.padBody} showsVerticalScrollIndicator={false}>
+          <Text style={styles.fieldLabel}>选择后，本次会话中的生成（文生图/改图）将使用该画幅；不选择时默认跟随画布原图比例（无画布图则跟随模型默认）。所选画幅会自动映射到当前模型支持的最近尺寸档位。</Text>
           <View style={styles.sizeGrid}>
-            {outpaintPresets(imageModel?.provider, currentImage?.width, currentImage?.height).map((preset) => (
+            {currentImage && currentImage.width && currentImage.height ? (
               <Pressable
-                key={`${preset.label}-${preset.size}`}
-                style={[styles.sizeBtn, genSize?.value === preset.size && styles.sizeBtnSelected]}
-                onPress={() => { setGenSize({ value: preset.size, label: preset.label }); setSheet(null); notify(`已选择 ${preset.label} ${preset.size}`); }}
+                style={[styles.sizeBtn, (!genSize || genSize?.label === '原比例') && styles.sizeBtnSelected]}
+                onPress={() => { const v = originalSizeFor(currentImage); setGenSize({ value: v, label: '原比例' }); setSheet(null); notify(`已选择 原比例 ${v}`); }}
               >
-                <Text style={[styles.sizeLabel, genSize?.value === preset.size && styles.sizeBtnOriginalText]}>{preset.label}</Text>
-                <Text style={[styles.sizeValue, genSize?.value === preset.size && styles.sizeBtnOriginalValue]}>{preset.size}</Text>
+                <Text style={[styles.sizeLabel, (!genSize || genSize?.label === '原比例') && styles.sizeBtnOriginalText]}>原比例</Text>
+                <Text style={[styles.sizeValue, (!genSize || genSize?.label === '原比例') && styles.sizeBtnOriginalValue]}>{originalSizeFor(currentImage)}</Text>
               </Pressable>
-            ))}
+            ) : null}
+            {GEN_RATIOS.map((r) => {
+              const v = ratioToSize(imageModel?.provider, r);
+              const active = genSize?.label === r;
+              return (
+                <Pressable key={r} style={[styles.sizeBtn, active && styles.sizeBtnSelected]} onPress={() => { setGenSize({ value: v, label: r }); setSheet(null); notify(`已选择 ${r} ${v}`); }}>
+                  <Text style={[styles.sizeLabel, active && styles.sizeBtnOriginalText]}>{r}</Text>
+                  <Text style={[styles.sizeValue, active && styles.sizeBtnOriginalValue]}>{v}</Text>
+                </Pressable>
+              );
+            })}
           </View>
           <Text style={styles.fieldLabel}>自定义宽 × 高（像素，256-4096）</Text>
           <View style={styles.customSizeRow}>
@@ -1829,11 +1849,11 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             </Pressable>
           </View>
           {genSize && (
-            <Pressable onPress={() => { setGenSize(null); setCustomW(''); setCustomH(''); setSheet(null); notify('已恢复模型默认尺寸'); }}>
-              <Text style={styles.linkText}>恢复跟随模型默认</Text>
+            <Pressable onPress={() => { setGenSize(null); setCustomW(''); setCustomH(''); setSheet(null); notify('已恢复默认（有画布图时使用原比例）'); }}>
+              <Text style={styles.linkText}>恢复默认</Text>
             </Pressable>
           )}
-        </View>
+        </ScrollView>
       </ModalSheet>
 
       {/* Extract hint sheet */}
@@ -2174,7 +2194,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     styleToggle: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingBottom: spacing.xs },
     styleToggleText: { fontSize: fontSize.xs, color: c.muted, fontWeight: '600' },
     styleBadge: { fontSize: 10, color: c.accent, fontWeight: '700', backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: 6, paddingVertical: 1, marginLeft: 4 },
-    styleInput: { minHeight: 56, maxHeight: 96, marginBottom: spacing.sm },
+    styleInput: { minHeight: 52, maxHeight: 80, marginBottom: spacing.sm },
     previewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', paddingTop: 50, paddingBottom: 30 },
     previewHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
     previewTitle: { color: '#fff', fontSize: fontSize.sm, fontWeight: '600', flex: 1 },
@@ -2215,7 +2235,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     miniChipActive: { backgroundColor: c.accent, borderColor: c.accent },
     miniChipText: { fontSize: fontSize.xs, color: c.muted, fontWeight: '600' },
     miniChipTextActive: { color: '#fff', fontWeight: '700' },
-    outpaintPreview: { width: '100%', maxWidth: 260, alignSelf: 'center', borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, backgroundColor: c.accentLight, overflow: 'hidden', marginBottom: spacing.xs },
+    outpaintPreview: { width: '100%', maxWidth: 170, alignSelf: 'center', borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, backgroundColor: c.accentLight, overflow: 'hidden', marginBottom: spacing.xs },
     outpaintMeta: { fontSize: fontSize.xs, color: c.muted, textAlign: 'center', marginBottom: spacing.sm },
     customSizeRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
     customSizeInput: { flex: 1, height: 42, borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, backgroundColor: c.card, paddingHorizontal: spacing.md, fontSize: fontSize.md, color: c.text },
