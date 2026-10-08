@@ -7,14 +7,13 @@ import {
   Pressable,
   StyleSheet,
   Text,
-  TouchableWithoutFeedback,
   View,
 } from 'react-native';
 import * as ImageManipulator from 'expo-image-manipulator';
 import * as FileSystem from 'expo-file-system';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useTheme } from '../theme';
-import { fontSize, radius, spacing } from '../theme';
+import { radius } from '../theme';
 
 type CropAsset = {
   data: string;
@@ -33,21 +32,22 @@ type Props = {
 };
 
 type DragRect = { x: number; y: number; width: number; height: number };
+type DragHandle = 'create' | 'move' | 'nw' | 'ne' | 'sw' | 'se';
 
 /** 选区有效性阈值：与工作台「局部」框选一致（占比 ≥2%） */
 const MIN_PERCENT = 2;
-/** 选区最小像素阈值：避免原图过小时裁剪出几乎无内容的图（与服务端 256px 输入限制留余量） */
+/** 选区最小像素阈值：避免原图过小时裁剪出几乎无内容的图 */
 const MIN_PIXELS = 32;
-/** 缩放范围 */
-const ZOOM_MIN = 1;
-const ZOOM_MAX = 5;
+/** 四角手柄触摸热区半径 */
+const CORNER_TOL = 34;
+/** 选区最小尺寸（像素，防止缩成不可见） */
+const MIN_SIZE = 20;
 
 /**
- * 上传裁剪：与工作台「局部」框选同款交互——
- * 在图片上拖拽画出选区（松手保持，可重新拖拽改选），确认后按选区裁剪导入。
- *
- * 关键：进入裁剪前先烘焙 EXIF 旋转，得到 normalized uri，
- * 后续显示和裁剪都基于 normalized 尺寸，避免坐标空间不一致。
+ * 上传裁剪：复用工作台「局部」框选同款交互——
+ * hitTest 判定手柄（四角 resize / 内部 move / 空白新建），
+ * clampRect 夹紧到图片显示区，locationX/Y 本地坐标无测量偏移。
+ * 图片始终 contain 适配，不缩放，坐标空间稳定。
  */
 export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, onConfirm }: Props) {
   const { colors } = useTheme();
@@ -58,75 +58,17 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
   const [dragRect, setDragRect] = useState<DragRect | null>(null);
   const [busy, setBusy] = useState(false);
   const [normalizing, setNormalizing] = useState(false);
-  /** 双指缩放进行中标记（防止 PanResponder 同时画选区） */
-  const isPinchingRef = useRef(false);
   // 烘焙 EXIF 后的 uri（已旋转到正确方向，后续显示和裁剪都基于它）
   const [normalizedUri, setNormalizedUri] = useState<string | null>(null);
   const normalizedUriRef = useRef<string | null>(null);
   normalizedUriRef.current = normalizedUri;
   const dragStartRef = useRef<{ x: number; y: number } | null>(null);
-  const containerRef = useRef<View | null>(null);
-  const originRef = useRef({ x: 0, y: 0 });
-  // 手势回调经 ref 读取最新显示区，保证 PanResponder 只创建一次（拖动中不替换 panHandlers）
-  const displayRef = useRef<{ x: number; y: number; w: number; h: number } | null>(null);
-
-  // ---- 缩放状态 ----
-  const [scale, setScale] = useState(1);
-  const [offset, setOffset] = useState({ x: 0, y: 0 });
-  const scaleRef = useRef(1);
-  const offsetRef = useRef({ x: 0, y: 0 });
-  const lastPinchDistRef = useRef(0);
-  const pinchCenterRef = useRef({ x: 0, y: 0 });
-
-  // 双指捏合手势（使用 onTouch 事件）
-  function handleTouchStart(e: any) {
-    const touches = e.nativeEvent.touches || [];
-    if (touches.length === 2) {
-      isPinchingRef.current = true;
-      const t = touches as Array<{ pageX: number; pageY: number }>;
-      const dx = t[0].pageX - t[1].pageX;
-      const dy = t[0].pageY - t[1].pageY;
-      lastPinchDistRef.current = Math.sqrt(dx * dx + dy * dy);
-      pinchCenterRef.current = {
-        x: (t[0].pageX + t[1].pageX) / 2,
-        y: (t[0].pageY + t[1].pageY) / 2,
-      };
-    }
-  }
-
-  function handleTouchMove(e: any) {
-    const touches = e.nativeEvent.touches || [];
-    if (touches.length !== 2) return;
-    const t = touches as Array<{ pageX: number; pageY: number }>;
-    const dx = t[0].pageX - t[1].pageX;
-    const dy = t[0].pageY - t[1].pageY;
-    const dist = Math.sqrt(dx * dx + dy * dy);
-    if (dist === 0) return;
-    const prev = lastPinchDistRef.current;
-    if (prev === 0) { lastPinchDistRef.current = dist; return; }
-    const newScale = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, scaleRef.current * (dist / prev)));
-    const cx = (t[0].pageX + t[1].pageX) / 2 - originRef.current.x;
-    const cy = (t[0].pageY + t[1].pageY) / 2 - originRef.current.y;
-    const d = displayRef.current;
-    if (!d) return;
-    const ratio = newScale / scaleRef.current;
-    setOffset({
-      x: offsetRef.current.x - (cx - d.x - d.w / 2) * (ratio - 1),
-      y: offsetRef.current.y - (cy - d.y - d.h / 2) * (ratio - 1),
-    });
-    setScale(newScale);
-    scaleRef.current = newScale;
-    offsetRef.current = { x: offsetRef.current.x - (cx - d.x - d.w / 2) * (ratio - 1), y: offsetRef.current.y - (cy - d.y - d.h / 2) * (ratio - 1) };
-    lastPinchDistRef.current = dist;
-  }
-
-  function handleTouchEnd() {
-    lastPinchDistRef.current = 0;
-    isPinchingRef.current = false;
-  }
+  const dragHandleRef = useRef<DragHandle>('create');
+  const rectBeforeDragRef = useRef<DragRect | null>(null);
+  const dragRectRef = useRef<DragRect | null>(null);
+  dragRectRef.current = dragRect;
 
   // 进入裁剪界面时先烘焙 EXIF，得到 normalized uri
-  // 这样 <Image> 显示的尺寸和 ImageManipulator 裁剪的尺寸就一致了
   useEffect(() => {
     if (!visible) return;
     setDragRect(null);
@@ -147,7 +89,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
           if (!alive) return;
           workUri = out.uri;
         } catch {
-          // 烘焙失败则退回原图（显示可能不对但至少不崩溃）
+          // 烘焙失败则退回原图
         } finally {
           if (alive) setNormalizing(false);
         }
@@ -163,7 +105,6 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
 
     return () => {
       alive = false;
-      // 清理临时文件
       const tmpUri = normalizedUriRef.current;
       if (tmpUri && tmpUri !== uri) {
         FileSystem.deleteAsync(tmpUri, { idempotent: true }).catch(() => {});
@@ -172,7 +113,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, uri, rotation]);
 
-  // contain 适配后的图片显示区（相对容器），与「局部」的 imageDisplay 同一算法
+  // contain 适配后的图片显示区（相对容器）
   const display = useMemo(() => {
     if (!imgSize || !box.w || !box.h) return null;
     const s = Math.min(box.w / imgSize.w, box.h / imgSize.h);
@@ -180,60 +121,111 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
     const h = imgSize.h * s;
     return { w, h, x: (box.w - w) / 2, y: (box.h - h) / 2 };
   }, [imgSize, box]);
-  displayRef.current = display;
+
+  /** 判断触摸点落在已有选区的哪个手柄上（与画布框选同款） */
+  function hitTest(p: { x: number; y: number }, rect: DragRect): DragHandle {
+    if (!rect || rect.width < 1 || rect.height < 1) return 'create';
+    const { x, y, width, height } = rect;
+    const left = x, right = x + width, top = y, bottom = y + height;
+    const hit = Math.min(CORNER_TOL, Math.min(width, height) / 2);
+    if (Math.abs(p.x - left) <= hit && Math.abs(p.y - top) <= hit) return 'nw';
+    if (Math.abs(p.x - right) <= hit && Math.abs(p.y - top) <= hit) return 'ne';
+    if (Math.abs(p.x - left) <= hit && Math.abs(p.y - bottom) <= hit) return 'sw';
+    if (Math.abs(p.x - right) <= hit && Math.abs(p.y - bottom) <= hit) return 'se';
+    if (p.x >= left && p.x <= right && p.y >= top && p.y <= bottom) return 'move';
+    return 'create';
+  }
+
+  /** 夹紧到图片显示区域（与画布框选同款） */
+  function clampRect(r: DragRect): DragRect {
+    if (!display) return r;
+    const maxX = display.x + display.w;
+    const maxY = display.y + display.h;
+    return {
+      x: Math.max(display.x, Math.min(maxX - MIN_SIZE, r.x)),
+      y: Math.max(display.y, Math.min(maxY - MIN_SIZE, r.y)),
+      width: Math.max(MIN_SIZE, Math.min(maxX - r.x, r.width)),
+      height: Math.max(MIN_SIZE, Math.min(maxY - r.y, r.height)),
+    };
+  }
 
   const pan = useMemo(
     () =>
       PanResponder.create({
-        onStartShouldSetPanResponder: () => !isPinchingRef.current,
-      onMoveShouldSetPanResponder: () => !isPinchingRef.current,
-        onPanResponderGrant: (e) => {
-          const d = displayRef.current;
-          if (!d) return;
-          // Android 上 locationX 会随子 View 边界跳变，统一用 pageX 减容器原点
-          const px = e.nativeEvent.pageX - originRef.current.x;
-          const py = e.nativeEvent.pageY - originRef.current.y;
-          const p = {
-            x: Math.max(d.x, Math.min(d.x + d.w, px)),
-            y: Math.max(d.y, Math.min(d.y + d.h, py)),
-          };
+        onStartShouldSetPanResponder: () => true,
+        onMoveShouldSetPanResponder: () => true,
+        onPanResponderGrant: (evt) => {
+          if (!display) return;
+          const p = { x: evt.nativeEvent.locationX, y: evt.nativeEvent.locationY };
+          const cur = dragRectRef.current;
+          const handle = cur ? hitTest(p, cur) : 'create';
+          dragHandleRef.current = handle;
+          rectBeforeDragRef.current = cur ? { ...cur } : null;
           dragStartRef.current = p;
-          setDragRect({ x: p.x, y: p.y, width: 0, height: 0 });
+          if (handle === 'create') {
+            setDragRect({ x: p.x, y: p.y, width: 0, height: 0 });
+          }
         },
-        onPanResponderMove: (e) => {
-          const start = dragStartRef.current;
-          const d = displayRef.current;
-          if (!start || !d) return;
-          const px = e.nativeEvent.pageX - originRef.current.x;
-          const py = e.nativeEvent.pageY - originRef.current.y;
-          const left = Math.max(d.x, Math.min(start.x, px));
-          const right = Math.min(d.x + d.w, Math.max(start.x, px));
-          const top = Math.max(d.y, Math.min(start.y, py));
-          const bottom = Math.min(d.y + d.h, Math.max(start.y, py));
-          setDragRect({ x: left, y: top, width: right - left, height: bottom - top });
+        onPanResponderMove: (evt) => {
+          if (!display) return;
+          const p = { x: evt.nativeEvent.locationX, y: evt.nativeEvent.locationY };
+          const handle = dragHandleRef.current;
+          const base = rectBeforeDragRef.current;
+          if (handle === 'create') {
+            const start = dragStartRef.current;
+            if (!start) return;
+            const left = Math.max(display.x, Math.min(start.x, p.x));
+            const right = Math.min(display.x + display.w, Math.max(start.x, p.x));
+            const top = Math.max(display.y, Math.min(start.y, p.y));
+            const bottom = Math.min(display.y + display.h, Math.max(start.y, p.y));
+            setDragRect({ x: left, y: top, width: right - left, height: bottom - top });
+          } else if (handle === 'move' && base) {
+            const dx = p.x - (dragStartRef.current?.x ?? p.x);
+            const dy = p.y - (dragStartRef.current?.y ?? p.y);
+            setDragRect(clampRect({ x: base.x + dx, y: base.y + dy, width: base.width, height: base.height }));
+          } else if (base && (handle === 'nw' || handle === 'ne' || handle === 'sw' || handle === 'se')) {
+            const dLeft = display.x, dTop = display.y;
+            const dRight = display.x + display.w, dBottom = display.y + display.h;
+            const clamp = (v: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, v));
+            let newRect: DragRect;
+            if (handle === 'nw') {
+              const right = base.x + base.width, bottom = base.y + base.height;
+              const nx = clamp(p.x, dLeft, right - MIN_SIZE);
+              const ny = clamp(p.y, dTop, bottom - MIN_SIZE);
+              newRect = { x: nx, y: ny, width: right - nx, height: bottom - ny };
+            } else if (handle === 'ne') {
+              const bottom = base.y + base.height;
+              const nx = clamp(p.x, base.x + MIN_SIZE, dRight);
+              const ny = clamp(p.y, dTop, bottom - MIN_SIZE);
+              newRect = { x: base.x, y: ny, width: nx - base.x, height: bottom - ny };
+            } else if (handle === 'sw') {
+              const right = base.x + base.width;
+              const nx = clamp(p.x, dLeft, right - MIN_SIZE);
+              const ny = clamp(p.y, base.y + MIN_SIZE, dBottom);
+              newRect = { x: nx, y: base.y, width: right - nx, height: ny - base.y };
+            } else { // se
+              const nx = clamp(p.x, base.x + MIN_SIZE, dRight);
+              const ny = clamp(p.y, base.y + MIN_SIZE, dBottom);
+              newRect = { x: base.x, y: base.y, width: nx - base.x, height: ny - base.y };
+            }
+            setDragRect(newRect);
+          }
         },
-        onPanResponderRelease: () => { dragStartRef.current = null; },
+        onPanResponderRelease: () => {
+          dragStartRef.current = null;
+          rectBeforeDragRef.current = null;
+        },
       }),
-    []
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [display]
   );
 
   function handleLayout(e: { nativeEvent: { layout: { width: number; height: number } } }) {
     const { width, height } = e.nativeEvent.layout;
     setBox({ w: width, h: height });
-    containerRef.current?.measureInWindow((x, y) => {
-      originRef.current = { x, y };
-    });
   }
 
-  // 重置缩放
-  function resetZoom() {
-    setScale(1);
-    setOffset({ x: 0, y: 0 });
-    scaleRef.current = 1;
-    offsetRef.current = { x: 0, y: 0 };
-  }
-
-  // 选区有效性（与「局部」一致：≥2% × ≥2%；同时要求像素 ≥32 以避免原图过小时裁剪无效）
+  // 选区有效性（基于 contain 显示区，坐标空间与 display 一致）
   const percent = useMemo(() => {
     if (!dragRect || !display || display.w < 1 || display.h < 1) return null;
     return {
@@ -254,11 +246,10 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
     if (!imgSize || !display || !dragRect || !valid || busy || !normalizedUri) return;
     setBusy(true);
     try {
-      // normalizedUri 已经烘焙过 EXIF，直接按显示坐标映射裁剪即可
-      const cropX = Math.round(((dragRect.x - display.x) / display.w) * imgSize.w);
-      const cropY = Math.round(((dragRect.y - display.y) / display.h) * imgSize.h);
-      const cropW = Math.max(1, Math.round((dragRect.width / display.w) * imgSize.w));
-      const cropH = Math.max(1, Math.round((dragRect.height / display.h) * imgSize.h));
+      const cropX = Math.round(Math.max(0, ((dragRect.x - display.x) / display.w) * imgSize.w));
+      const cropY = Math.round(Math.max(0, ((dragRect.y - display.y) / display.h) * imgSize.h));
+      const cropW = Math.max(1, Math.min(imgSize.w - cropX, Math.round((dragRect.width / display.w) * imgSize.w)));
+      const cropH = Math.max(1, Math.min(imgSize.h - cropY, Math.round((dragRect.height / display.h) * imgSize.h)));
       const out = await ImageManipulator.manipulateAsync(
         normalizedUri,
         [{ crop: { originX: cropX, originY: cropY, width: cropW, height: cropH } }],
@@ -287,7 +278,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
         </View>
 
         <View style={styles.canvas}>
-          <View ref={containerRef} style={styles.canvasInner} onLayout={handleLayout} onTouchStart={handleTouchStart} onTouchMove={handleTouchMove} onTouchEnd={handleTouchEnd} {...pan.panHandlers}>
+          <View style={styles.canvasInner} onLayout={handleLayout} {...pan.panHandlers}>
             {normalizing ? (
               <View style={styles.loadingWrap}>
                 <ActivityIndicator size="large" color={colors.accent} />
@@ -295,87 +286,27 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
               </View>
             ) : display && showUri ? (
               <>
-                {/* 缩放后的图片容器 */}
-                <View style={{
-                  position: 'absolute',
-                  left: display.x + offset.x,
-                  top: display.y + offset.y,
-                  width: display.w * scale,
-                  height: display.h * scale,
-                }}>
-                  <Image
-                    source={{ uri: showUri }}
-                    style={{ width: display.w * scale, height: display.h * scale }}
-                    resizeMode="stretch"
-                  />
-                </View>
-                {/* 选区外四块半透明遮罩 + 边框 + 四角指示点（与「局部」蒙版一致） */}
-                {/* 遮罩位置需要根据缩放调整 */}
+                <Image
+                  source={{ uri: showUri }}
+                  style={{ position: 'absolute', left: display.x, top: display.y, width: display.w, height: display.h }}
+                  resizeMode="stretch"
+                />
+                {/* 选区外四块半透明遮罩 + 边框 + 四角拖拽手柄（与画布蒙版同款） */}
                 {dragRect ? (
                   <View pointerEvents="none" style={styles.maskLayer}>
-                    <View style={{
-                      position: 'absolute',
-                      left: display.x + offset.x,
-                      top: display.y + offset.y,
-                      width: display.w * scale,
-                      height: display.h * scale,
-                    }}>
-                      {/* 上方遮罩 */}
-                      <View style={{
-                        position: 'absolute', left: 0, right: 0, top: 0,
-                        height: Math.max(0, ((dragRect.y - display.y - offset.y) / scale)),
-                        backgroundColor: 'rgba(0,0,0,0.55)',
-                      }} />
-                      {/* 下方遮罩 */}
-                      <View style={{
-                        position: 'absolute', left: 0, right: 0,
-                        top: ((dragRect.y - display.y - offset.y) / scale) + (dragRect.height / scale),
-                        bottom: 0,
-                        backgroundColor: 'rgba(0,0,0,0.55)',
-                      }} />
-                      {/* 左方遮罩 */}
-                      <View style={{
-                        position: 'absolute', left: 0, top: (dragRect.y - display.y - offset.y) / scale,
-                        width: Math.max(0, (dragRect.x - display.x - offset.x) / scale),
-                        height: dragRect.height / scale,
-                        backgroundColor: 'rgba(0,0,0,0.55)',
-                      }} />
-                      {/* 右方遮罩 */}
-                      <View style={{
-                        position: 'absolute', right: 0, top: (dragRect.y - display.y - offset.y) / scale,
-                        width: Math.max(0, (display.x + offset.x + display.w * scale - dragRect.x - dragRect.width - offset.x) / scale),
-                        height: dragRect.height / scale,
-                        backgroundColor: 'rgba(0,0,0,0.55)',
-                      }} />
-                      {/* 选区边框 */}
-                      <View style={{
-                        position: 'absolute',
-                        left: (dragRect.x - display.x - offset.x) / scale,
-                        top: (dragRect.y - display.y - offset.y) / scale,
-                        width: dragRect.width / scale,
-                        height: dragRect.height / scale,
-                        borderWidth: 2 / scale,
-                        borderColor: colors.accent,
-                        borderRadius: 8 / scale,
-                      }} />
-                      {/* 四角指示点 */}
-                      {[
-                        { l: dragRect.x, t: dragRect.y },
-                        { l: dragRect.x + dragRect.width, t: dragRect.y },
-                        { l: dragRect.x, t: dragRect.y + dragRect.height },
-                        { l: dragRect.x + dragRect.width, t: dragRect.y + dragRect.height },
-                      ].map((corner, i) => (
-                        <View key={i} style={[
-                          styles.cornerDot,
-                          {
-                            left: (corner.l - display.x - offset.x) / scale - 4 / scale,
-                            top: (corner.t - display.y - offset.y) / scale - 4 / scale,
-                            width: 8 / scale,
-                            height: 8 / scale,
-                          }
-                        ]} />
-                      ))}
-                    </View>
+                    <View style={{ position: 'absolute', left: display.x, top: display.y, width: display.w, height: Math.max(0, dragRect.y - display.y), backgroundColor: 'rgba(0,0,0,0.55)' }} />
+                    <View style={{ position: 'absolute', left: display.x, top: dragRect.y + dragRect.height, width: display.w, height: Math.max(0, (display.y + display.h) - (dragRect.y + dragRect.height)), backgroundColor: 'rgba(0,0,0,0.55)' }} />
+                    <View style={{ position: 'absolute', left: display.x, top: Math.max(display.y, dragRect.y), width: Math.max(0, dragRect.x - display.x), height: Math.max(0, Math.min(dragRect.y + dragRect.height, display.y + display.h) - Math.max(display.y, dragRect.y)), backgroundColor: 'rgba(0,0,0,0.55)' }} />
+                    <View style={{ position: 'absolute', left: dragRect.x + dragRect.width, top: Math.max(display.y, dragRect.y), width: Math.max(0, (display.x + display.w) - (dragRect.x + dragRect.width)), height: Math.max(0, Math.min(dragRect.y + dragRect.height, display.y + display.h) - Math.max(display.y, dragRect.y)), backgroundColor: 'rgba(0,0,0,0.55)' }} />
+                    <View style={{ position: 'absolute', left: dragRect.x, top: dragRect.y, width: dragRect.width, height: dragRect.height, borderWidth: 2, borderColor: colors.accent, borderRadius: radius.sm }} />
+                    {[
+                      { left: dragRect.x, top: dragRect.y },
+                      { left: dragRect.x + dragRect.width, top: dragRect.y },
+                      { left: dragRect.x, top: dragRect.y + dragRect.height },
+                      { left: dragRect.x + dragRect.width, top: dragRect.y + dragRect.height },
+                    ].map((c, i) => (
+                      <View key={i} style={[styles.cornerDot, { left: c.left - 6, top: c.top - 6 }]} />
+                    ))}
                   </View>
                 ) : null}
               </>
@@ -391,37 +322,6 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
           >
             <Text style={styles.footerGhost}>使用原图</Text>
           </Pressable>
-          {/* 缩放控制 */}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Pressable
-              style={[styles.zoomBtn, { opacity: scale <= ZOOM_MIN ? 0.3 : 1 }]}
-              onPress={() => {
-                const newScale = Math.max(ZOOM_MIN, scale / 1.5);
-                setScale(newScale);
-                scaleRef.current = newScale;
-              }}
-              disabled={scale <= ZOOM_MIN}
-            >
-              <Text style={styles.zoomText}>−</Text>
-            </Pressable>
-            <Pressable
-              style={styles.zoomBtn}
-              onPress={resetZoom}
-            >
-              <Text style={styles.zoomText}>1×</Text>
-            </Pressable>
-            <Pressable
-              style={[styles.zoomBtn, { opacity: scale >= ZOOM_MAX ? 0.3 : 1 }]}
-              onPress={() => {
-                const newScale = Math.min(ZOOM_MAX, scale * 1.5);
-                setScale(newScale);
-                scaleRef.current = newScale;
-              }}
-              disabled={scale >= ZOOM_MAX}
-            >
-              <Text style={styles.zoomText}>+</Text>
-            </Pressable>
-          </View>
           <Text style={styles.sizeText}>
             {valid && percent && pixelSize
               ? `${percent.w.toFixed(0)}% × ${percent.h.toFixed(0)}% · ${Math.round(pixelSize.w)}×${Math.round(pixelSize.h)}px`
@@ -467,10 +367,12 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     maskLayer: { position: 'absolute', left: 0, top: 0, right: 0, bottom: 0 },
     cornerDot: {
       position: 'absolute',
-      width: 8,
-      height: 8,
-      borderRadius: 4,
+      width: 12,
+      height: 12,
+      borderRadius: 6,
       backgroundColor: c.accent,
+      borderWidth: 2,
+      borderColor: '#fff',
     },
     footer: {
       flexDirection: 'row',
@@ -490,13 +392,4 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     footerGhost: { color: '#fff', fontSize: 15, fontWeight: '500' },
     footerPrimary: { color: '#fff', fontSize: 15, fontWeight: '600' },
     sizeText: { flex: 1, color: 'rgba(255,255,255,0.7)', fontSize: 13, textAlign: 'center' },
-    zoomBtn: {
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: 'rgba(255,255,255,0.2)',
-      alignItems: 'center',
-      justifyContent: 'center',
-    },
-    zoomText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   });

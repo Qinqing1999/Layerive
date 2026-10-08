@@ -1,6 +1,15 @@
 import React, { useCallback, useState } from 'react';
-import { Image, StyleSheet, Text, View, type ImageResizeMode, type ImageStyle, type ImageSourcePropType } from 'react-native';
+import { StyleSheet, Text, View, type ImageResizeMode, type ImageSourcePropType, type ImageStyle } from 'react-native';
+import { Image, type ImageProps } from 'expo-image';
 import { useTheme } from '../theme';
+
+/** RN resizeMode → expo-image contentFit 映射 */
+const CONTENT_FIT: Partial<Record<ImageResizeMode, NonNullable<ImageProps['contentFit']>>> = {
+  cover: 'cover',
+  contain: 'contain',
+  stretch: 'fill',
+  center: 'none',
+};
 
 type Props = {
   source: ImageSourcePropType | undefined;
@@ -11,8 +20,8 @@ type Props = {
 };
 
 /**
- * 带加载失败兜底的远程图片组件：网络异常或 URL 失效时显示占位图，
- * 避免出现空白或闪烁。其它使用方式与 RN Image 一致。
+ * expo-image 封装：自带磁盘+内存缓存与渐进加载（画廊长列表重复加载明显减少），
+ * 网络异常或 URL 失效时显示占位提示，避免空白或闪烁。其余使用方式与 RN Image 一致。
  */
 export function RemoteImage({ source, style, resizeMode = 'cover', fallbackLabel = '图片加载失败' }: Props) {
   const { colors } = useTheme();
@@ -26,7 +35,15 @@ export function RemoteImage({ source, style, resizeMode = 'cover', fallbackLabel
       </View>
     );
   }
-  return <Image source={source} style={style} resizeMode={resizeMode} onError={handleError} />;
+  return (
+    <Image
+      source={source as ImageProps['source']}
+      style={style}
+      contentFit={CONTENT_FIT[resizeMode] ?? 'cover'}
+      transition={120}
+      onError={handleError}
+    />
+  );
 }
 
 const styles = StyleSheet.create({

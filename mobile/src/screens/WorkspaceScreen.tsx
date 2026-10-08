@@ -379,6 +379,27 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     return () => { if (draftTimerRef.current) clearTimeout(draftTimerRef.current); };
   }, [prompt, count, stylePrompt, projectId, bundle]);
 
+  // 生成比例按项目持久化到 AsyncStorage（本地）：退出重进后恢复上次选择
+  const genSizeLoadedRef = useRef<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    genSizeLoadedRef.current = null;
+    AsyncStorage.getItem(`layerive-gensize:${projectId}`).then((raw) => {
+      if (!alive) return;
+      try {
+        const saved = raw ? (JSON.parse(raw) as { value: string; label: string } | null) : null;
+        setGenSize(saved ?? null);
+      } catch { setGenSize(null); }
+      genSizeLoadedRef.current = projectId;
+    }).catch(() => { genSizeLoadedRef.current = projectId; });
+    return () => { alive = false; };
+  }, [projectId]);
+  // 恢复完成前不回写，避免切项目时把上个项目的比例写进新项目
+  useEffect(() => {
+    if (genSizeLoadedRef.current !== projectId) return;
+    AsyncStorage.setItem(`layerive-gensize:${projectId}`, JSON.stringify(genSize)).catch(() => { /* ignore */ });
+  }, [projectId, genSize]);
+
   // 进入工作台（或 App 重启后重进）恢复进行中/排队中的任务，让队列显示与轮询接上
   useEffect(() => {
     if (!bundle) return;
