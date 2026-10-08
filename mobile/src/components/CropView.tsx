@@ -68,7 +68,7 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
   const dragRectRef = useRef<DragRect | null>(null);
   dragRectRef.current = dragRect;
 
-  // 进入裁剪界面时先烘焙 EXIF，得到 normalized uri
+  // 进入裁剪界面时先烘焙 EXIF，得到 normalized uri 和准确尺寸
   useEffect(() => {
     if (!visible) return;
     setDragRect(null);
@@ -77,30 +77,33 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
     let alive = true;
 
     (async () => {
-      let workUri = uri;
-      if (rotation) {
+      // 不管有没有 rotation，都过一遍 ImageManipulator：
+      // 1) 烘焙 EXIF rotation（Android 原生裁剪不自动烘焙）
+      // 2）返回值 out.width/out.height 是处理后真实尺寸，比 Image.getSize 可靠
+      //    （Image.getSize 对 file:// URI 或带 EXIF 的 JPEG 可能返回未旋转尺寸）
+      const actions = rotation ? [{ rotate: rotation }] : [];
+      try {
         setNormalizing(true);
-        try {
-          const out = await ImageManipulator.manipulateAsync(
-            uri,
-            [{ rotate: rotation }],
-            { compress: 1, format: ImageManipulator.SaveFormat.JPEG }
-          );
-          if (!alive) return;
-          workUri = out.uri;
-        } catch {
-          // 烘焙失败则退回原图
-        } finally {
-          if (alive) setNormalizing(false);
-        }
+        const out = await ImageManipulator.manipulateAsync(
+          uri,
+          actions,
+          { compress: 1, format: ImageManipulator.SaveFormat.JPEG }
+        );
+        if (!alive) return;
+        setNormalizedUri(out.uri);
+        setImgSize({ w: out.width, h: out.height });
+      } catch {
+        // 处理失败则退回原图，用 Image.getSize 兜底
+        if (!alive) return;
+        setNormalizedUri(uri);
+        Image.getSize(
+          uri,
+          (w, h) => alive && setImgSize({ w, h }),
+          () => alive && setImgSize({ w: 1000, h: 1000 })
+        );
+      } finally {
+        if (alive) setNormalizing(false);
       }
-      if (!alive) return;
-      setNormalizedUri(workUri);
-      Image.getSize(
-        workUri,
-        (w, h) => alive && setImgSize({ w, h }),
-        () => alive && setImgSize({ w: 1000, h: 1000 })
-      );
     })();
 
     return () => {
@@ -286,11 +289,13 @@ export function CropView({ visible, uri, rotation = 0, onCancel, onUseOriginal, 
               </View>
             ) : display && showUri ? (
               <>
-                <Image
-                  source={{ uri: showUri }}
-                  style={{ position: 'absolute', left: display.x, top: display.y, width: display.w, height: display.h }}
-                  resizeMode="stretch"
-                />
+                <View pointerEvents="none" style={{ position: 'absolute', left: display.x, top: display.y, width: display.w, height: display.h }}>
+                  <Image
+                    source={{ uri: showUri }}
+                    style={{ width: '100%', height: '100%' }}
+                    resizeMode="stretch"
+                  />
+                </View>
                 {/* 选区外四块半透明遮罩 + 边框 + 四角拖拽手柄（与画布蒙版同款） */}
                 {dragRect ? (
                   <View pointerEvents="none" style={styles.maskLayer}>
