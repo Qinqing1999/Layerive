@@ -26,17 +26,19 @@ import { Icon } from '../components/Icon';
 type Props = {
   projects: Project[];
   loading: boolean;
+  isAdmin: boolean;
   onOpen: (id: string) => void;
   onCreate: (input: { name: string; description: string }) => Promise<void>;
   onRefresh: () => Promise<void>;
   onLogout: () => void;
+  onOpenModels: () => void;
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
 const formatUpdated = (value: string) =>
   new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 
-export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onLogout, notify }: Props) {
+export function HomeScreen({ projects, loading, isAdmin, onOpen, onCreate, onRefresh, onLogout, onOpenModels, notify }: Props) {
   const { colors, mode, toggle } = useTheme();
   const insets = useSafeAreaInsets();
   const styles = makeStyles(colors);
@@ -164,6 +166,43 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
     } catch (e) {
       notify((e as Error).message, 'error');
     } finally { setBusy(''); }
+  }
+
+  async function restoreBackup() {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['application/zip', 'application/octet-stream'],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const asset = result.assets?.[0];
+      if (!asset) return;
+      if (asset.size && asset.size > 500 * 1024 * 1024) { notify('备份文件过大（超过 500MB）', 'error'); return; }
+      Alert.alert(
+        '从备份恢复',
+        '恢复将覆盖当前所有数据，且需要重启服务端。确定继续？',
+        [
+          { text: '取消', style: 'cancel' },
+          {
+            text: '恢复',
+            style: 'destructive',
+            onPress: async () => {
+              setBusy('正在从备份恢复…');
+              try {
+                const base64 = await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 });
+                await api.restoreBackup(base64);
+                notify('备份已恢复，服务端正在重启');
+                await onRefresh();
+              } catch (e) {
+                notify((e as Error).message, 'error');
+              } finally { setBusy(''); }
+            },
+          },
+        ],
+      );
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    }
   }
 
   function openProjectMenu(project: Project) {
@@ -310,8 +349,12 @@ export function HomeScreen({ projects, loading, onOpen, onCreate, onRefresh, onL
         <Pressable style={styles.menuOverlay} onPress={() => setMenuVisible(false)}>
           <View style={styles.menuCard}>
             <Text style={styles.menuTitle}>更多</Text>
+            {isAdmin && (
+              <MenuItem icon="models" label="模型管理" colors={colors} onPress={() => { setMenuVisible(false); onOpenModels(); }} />
+            )}
             <MenuItem icon="import" label="导入项目 ZIP" colors={colors} onPress={() => { setMenuVisible(false); void importProject(); }} />
             <MenuItem icon="zip" label="下载完整备份" colors={colors} onPress={() => { setMenuVisible(false); void downloadBackup(); }} />
+            <MenuItem icon="data" label="从备份恢复" colors={colors} onPress={() => { setMenuVisible(false); void restoreBackup(); }} />
             <MenuItem icon={mode === 'dark' ? 'sun' : 'moon'} label={mode === 'dark' ? '切换为亮色模式' : '切换为暗色模式'} colors={colors} onPress={() => { toggle(); setMenuVisible(false); }} />
             <MenuItem icon="logout" label="退出登录" colors={colors} destructive onPress={() => { setMenuVisible(false); onLogout(); }} />
           </View>

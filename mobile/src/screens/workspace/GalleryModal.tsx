@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, Image, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 import * as Sharing from 'expo-sharing';
+import * as ImagePicker from 'expo-image-picker';
 import { RemoteImage } from '../../components/RemoteImage';
 import { api, downloadToCache, getServerBase, imageSource, resolveUrl } from '../../api';
 import { useTheme } from '../../theme';
@@ -13,6 +14,7 @@ import { Icon } from '../../components/Icon';
 type Props = {
   projectId: string;
   currentImageId: string | null;
+  visionModelId?: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onUse: (prompt: string, stylePrompt: string) => void;
   /** 把画廊图片导入为项目图片并设为画布（由父级完成上传） */
@@ -51,7 +53,7 @@ function categoryLabel(category: string): string {
 }
 
 /** Prompt gallery: search / fullscreen preview / use as canvas or reference; tap an entry to fill the prompt box. */
-export function GalleryModal({ projectId, currentImageId, notify, onUse, onSetCanvas, onUseReference }: Props) {
+export function GalleryModal({ projectId, currentImageId, visionModelId, notify, onUse, onSetCanvas, onUseReference }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [entries, setEntries] = useState<GalleryEntryItem[] | null>(null);
@@ -69,6 +71,8 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse, onSetCa
   const [editStyle, setEditStyle] = useState('');
   const [editCategory, setEditCategory] = useState('mine');
   const [editBusy, setEditBusy] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeResult, setAnalyzeResult] = useState<{ title: string; prompt: string; stylePrompt: string; imageData?: string; imageMime?: string } | null>(null);
 
   const load = useCallback(async () => {
     setLoadError(null);
@@ -141,6 +145,61 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse, onSetCa
     }
   }
 
+  /** 从相册选图，用视觉模型蒸馏提示词后加入画廊 */
+  async function analyzeFromAlbum() {
+    if (analyzing) return;
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) { notify('需要相册权限才能选图', 'error'); return; }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.85,
+        base64: true,
+      });
+      const asset = result.assets?.[0];
+      if (!asset?.base64) return;
+      setAnalyzing(true);
+      const mimeType = asset.mimeType || 'image/jpeg';
+      const data = await api.analyzeGalleryImage({
+        data: asset.base64,
+        mimeType,
+        visionModelId,
+      });
+      setAnalyzeResult({
+        title: data.title || '',
+        prompt: data.prompt || '',
+        stylePrompt: data.stylePrompt || '',
+        imageData: asset.base64,
+        imageMime: mimeType,
+      });
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function submitAnalyzeResult() {
+    if (!analyzeResult) return;
+    setEditBusy(true);
+    try {
+      await api.galleryAdd({
+        title: analyzeResult.title || '未命名',
+        prompt: analyzeResult.prompt,
+        stylePrompt: analyzeResult.stylePrompt,
+        category: 'mine',
+        image: analyzeResult.imageData ? { data: analyzeResult.imageData, mimeType: analyzeResult.imageMime || 'image/jpeg' } : null,
+      });
+      setAnalyzeResult(null);
+      await load();
+      notify('已添加到画廊');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setEditBusy(false);
+    }
+  }
+
   async function shareViewing() {
     if (!viewing?.image) return;
     try {
@@ -205,10 +264,16 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse, onSetCa
   return (
     <View style={styles.container}>
       <Text style={styles.baseLine} numberOfLines={1}>服务器：{base || '（未设置）'}</Text>
-      <Pressable style={[styles.saveBtn, (!currentImageId || saving) && { opacity: 0.5 }]} onPress={saveCurrentImage} disabled={!currentImageId || saving}>
-        {saving ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="gallery" size={16} color={colors.accent} />}
-        <Text style={styles.saveText}>收藏当前画布图片（自动提炼提示词）</Text>
-      </Pressable>
+      <View style={styles.actionRow}>
+        <Pressable style={[styles.saveBtn, (!currentImageId || saving) && { opacity: 0.5 }]} onPress={saveCurrentImage} disabled={!currentImageId || saving}>
+          {saving ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="gallery" size={16} color={colors.accent} />}
+          <Text style={styles.saveText}>收藏画布图片</Text>
+        </Pressable>
+        <Pressable style={[styles.saveBtn, analyzing && { opacity: 0.5 }]} onPress={analyzeFromAlbum} disabled={analyzing}>
+          {analyzing ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="camera" size={16} color={colors.accent} />}
+          <Text style={styles.saveText}>从相册蒸馏提示词</Text>
+        </Pressable>
+      </View>
       <View style={styles.searchRow}>
         <Icon name="search" size={15} color={colors.muted} />
         <TextInput style={styles.searchInput} value={query} onChangeText={setQuery} placeholder="搜索标题 / 提示词" placeholderTextColor={colors.muted} />
@@ -354,6 +419,29 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse, onSetCa
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* 相册蒸馏结果弹窗：确认/修改后加入画廊 */}
+      <Modal visible={Boolean(analyzeResult)} animationType="fade" transparent>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>蒸馏结果</Text>
+            <Text style={styles.fieldLabel}>标题</Text>
+            <TextInput style={styles.modalInput} value={analyzeResult?.title || ''} onChangeText={(v) => setAnalyzeResult((r) => r ? { ...r, title: v } : r)} placeholder="标题" placeholderTextColor={colors.muted} />
+            <Text style={styles.fieldLabel}>提示词</Text>
+            <TextInput style={[styles.modalInput, styles.modalTextarea]} value={analyzeResult?.prompt || ''} onChangeText={(v) => setAnalyzeResult((r) => r ? { ...r, prompt: v } : r)} placeholder="提示词" placeholderTextColor={colors.muted} multiline numberOfLines={3} />
+            <Text style={styles.fieldLabel}>风格提示词</Text>
+            <TextInput style={styles.modalInput} value={analyzeResult?.stylePrompt || ''} onChangeText={(v) => setAnalyzeResult((r) => r ? { ...r, stylePrompt: v } : r)} placeholder="风格提示词（可选）" placeholderTextColor={colors.muted} />
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancel} onPress={() => setAnalyzeResult(null)}>
+                <Text style={styles.modalCancelText}>取消</Text>
+              </Pressable>
+              <Pressable style={[styles.modalSubmit, editBusy && { opacity: 0.5 }]} onPress={submitAnalyzeResult} disabled={editBusy}>
+                {editBusy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.modalSubmitText}>添加到画廊</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -361,12 +449,13 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse, onSetCa
 const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({
     container: { flex: 1 },
+    actionRow: { flexDirection: 'row', gap: spacing.sm, marginHorizontal: spacing.md, marginTop: spacing.md },
     baseLine: { fontSize: fontSize.xs, color: c.muted, paddingHorizontal: spacing.md, paddingTop: spacing.sm },
     errorBox: { alignItems: 'center', marginTop: spacing.xl, gap: spacing.sm, paddingHorizontal: spacing.lg },
     errorText: { color: c.danger, fontSize: fontSize.sm, textAlign: 'center' },
     retryBtn: { paddingHorizontal: spacing.lg, paddingVertical: spacing.xs, borderRadius: radius.sm, borderWidth: 1, borderColor: c.accent },
     retryText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '600' },
-    saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, margin: spacing.md, padding: spacing.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: c.accent, borderRadius: radius.md },
+    saveBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, padding: spacing.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: c.accent, borderRadius: radius.md },
     saveText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '600' },
     searchRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginHorizontal: spacing.md, marginBottom: spacing.sm, paddingHorizontal: spacing.sm, height: 36, borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, backgroundColor: c.bg },
     searchInput: { flex: 1, fontSize: fontSize.sm, color: c.text, paddingVertical: 0 },

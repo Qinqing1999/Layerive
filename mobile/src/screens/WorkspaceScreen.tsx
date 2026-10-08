@@ -27,7 +27,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api, downloadToCache, imageSource, resolveUrl, versionDownloadPath } from '../api';
 import { TASK_OPERATION_LABELS, formatTaskTime } from '../labels';
-import { closestSizeForDimensions, defaultSquareSize, sizeForRatio, generationRatioOptions } from '../sizes';
+import { closestSizeForDimensions, outpaintPresets } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
 import type { GenerateResult, GenerationTask, LocalEditReference, Message, ModelConfig, ProjectBundle, ProjectImage, Version } from '../types';
@@ -49,7 +49,7 @@ type Props = {
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
-type SheetName = 'tasks' | 'history' | 'compare' | 'editText' | 'batch' | 'gallery' | 'localEdit' | 'outpaint' | 'extractHint' | null;
+type SheetName = 'tasks' | 'history' | 'compare' | 'editText' | 'batch' | 'gallery' | 'localEdit' | 'outpaint' | 'extractHint' | 'size' | null;
 type SelectMode = 'localEdit' | 'extract' | null;
 type WorkspaceTab = 'canvas' | 'chat' | 'history';
 
@@ -81,17 +81,26 @@ const STAGE_LABELS: Record<string, string> = {
   preserving: '还原框外像素…',
 };
 
-const OUTPAINT_HINT = '选择扩展方向与目标画布尺寸，新增区域仅延展背景，原图内容保持不变';
-
-const OUTPAINT_DIRECTIONS: { key: string; label: string }[] = [
-  { key: 'all', label: '四周' },
-  { key: 'horizontal', label: '左右' },
-  { key: 'vertical', label: '上下' },
-  { key: 'left', label: '向左' },
-  { key: 'right', label: '向右' },
+// 扩图方向与幅度选项
+const OUT_DIRS: { key: 'up' | 'down' | 'left' | 'right' | 'all'; label: string }[] = [
   { key: 'up', label: '向上' },
   { key: 'down', label: '向下' },
+  { key: 'left', label: '向左' },
+  { key: 'right', label: '向右' },
+  { key: 'all', label: '四周' },
 ];
+const OUT_SCALES: { value: number; label: string }[] = [
+  { value: 0.25, label: '+25%' },
+  { value: 0.5, label: '+50%' },
+  { value: 1, label: '+100%' },
+];
+// 生成比例选项：覆盖主流画幅，提交时映射到当前模型支持的最近档位
+const GEN_RATIOS = ['1:1', '4:3', '3:4', '16:9', '9:16', '3:2', '2:3', '4:5', '5:4', '21:9', '9:21'];
+
+function ratioToSize(provider: string | undefined, ratio: string): string {
+  const [w, h] = ratio.split(':').map(Number);
+  return closestSizeForDimensions(provider, w, h);
+}
 
 const SELECT_HINTS: Record<'localEdit' | 'extract', string> = {
   localEdit: '在图片上拖拽框选要修改的区域',
@@ -104,24 +113,24 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   const [bundle, setBundle] = useState<ProjectBundle | null>(null);
   const [loading, setLoading] = useState(true);
   const [prompt, setPrompt] = useState('');
+  const [stylePrompt, setStylePrompt] = useState('');
+  const [showStylePrompt, setShowStylePrompt] = useState(false);
+  // 主输入框内容高度：用 onContentSizeChange 显式设置，避免 Android 多行 TextInput 原生高度溢出 Yoga 边框
+  const [inputH, setInputH] = useState(0);
   const draftTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [activeTask, setActiveTask] = useState<GenerationTask | null>(null);
   const [bottomTab, setBottomTab] = useState<WorkspaceTab>('canvas');
   const insets = useSafeAreaInsets();
   const [preview, setPreview] = useState<{ image: ProjectImage; message?: Message } | null>(null);
   const [count, setCount] = useState(1);
-  /** 生成比例：'original' 原比例（默认）| 主流预设 key | 'custom' 自定义；实际档位由前端映射后下发 */
-  const [ratioKey, setRatioKey] = useState<string>('original');
-  const [customRatioText, setCustomRatioText] = useState('16:9');
-  const [customRatioOpen, setCustomRatioOpen] = useState(false);
-  const [customDraft, setCustomDraft] = useState({ w: '16', h: '9' });
-  /** 扩图：目标尺寸（null=未初始化，打开 sheet 时按原图比例预置）/ 自定义尺寸 / 扩展方向 / 新增区域内容描述 */
-  const [outpaintSize, setOutpaintSize] = useState<string | null>(null);
-  const [outpaintCustom, setOutpaintCustom] = useState(false);
-  const [outpaintCustomW, setOutpaintCustomW] = useState('');
-  const [outpaintCustomH, setOutpaintCustomH] = useState('');
-  const [outpaintDir, setOutpaintDir] = useState('all');
-  const [outpaintInstruction, setOutpaintInstruction] = useState('');
+  // 生成尺寸：null = 跟随模型默认；设置后文生图/改图均按此尺寸提交
+  const [genSize, setGenSize] = useState<{ value: string; label: string } | null>(null);
+  const [customW, setCustomW] = useState('');
+  const [customH, setCustomH] = useState('');
+  // 扩图增强：方向 / 扩展幅度 / 新增区域内容描述
+  const [outDir, setOutDir] = useState<'up' | 'down' | 'left' | 'right' | 'all'>('all');
+  const [outScale, setOutScale] = useState(0.5);
+  const [outHint, setOutHint] = useState('');
   const [uploading, setUploading] = useState(false);
   const [cropAsset, setCropAsset] = useState<{ uri: string; data: string; mimeType: string; name: string; use: 'upload' | 'reference'; rotation: number } | null>(null);
   const [parentVersionId, setParentVersionId] = useState<string | null>(null);
@@ -142,6 +151,16 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
   // 追踪用户是否在列表底部附近（决定新消息是否自动滚动）
   const isNearBottomRef = useRef(true);
   const prevMsgCountRef = useRef(0);
+  // 进入对话页时定位到最新消息：FlatList 分批渲染、内容在挂载后陆续增长，
+  // 用时间窗（1.2s）内每次内容变化都重新滚到底部，避免只滚到部分内容的底部
+  const initialScrollDeadlineRef = useRef(0);
+  useEffect(() => {
+    if (bottomTab === 'chat') {
+      isNearBottomRef.current = true;
+      initialScrollDeadlineRef.current = Date.now() + 1200;
+      chatListRef.current?.scrollToEnd({ animated: false });
+    }
+  }, [bottomTab]);
   /** 触摸事件 → 画布容器内坐标（pageX 全局稳定，不受 Android 子 View locationX 跳变影响） */
   function canvasPoint(evt: { nativeEvent: { pageX: number; pageY: number } }) {
     return {
@@ -296,7 +315,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       // 草稿仅首次加载恢复，避免轮询刷新覆盖用户正在输入的内容
       if (!draftRestoredRef.current) {
         draftRestoredRef.current = true;
-        const draft = data.project.draft as { prompt?: string; count?: number };
+        const draft = data.project.draft as { prompt?: string; count?: number; stylePrompt?: string };
         if (draft?.prompt) {
           setPrompt(draft.prompt);
           if (typeof draft?.count === 'number') setCount(draft.count);
@@ -305,11 +324,15 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           try {
             const local = await AsyncStorage.getItem(`layerive-draft:${projectId}`);
             if (local) {
-              const localDraft = JSON.parse(local) as { prompt?: string; count?: number };
+              const localDraft = JSON.parse(local) as { prompt?: string; count?: number; stylePrompt?: string };
               if (localDraft?.prompt) setPrompt(localDraft.prompt);
               if (typeof localDraft?.count === 'number') setCount(localDraft.count);
             }
           } catch { /* ignore */ }
+        }
+        if (typeof draft?.stylePrompt === 'string') {
+          setStylePrompt(draft.stylePrompt);
+          if (draft.stylePrompt) setShowStylePrompt(true);
         }
       }
       return data;
@@ -342,7 +365,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     if (draftTimerRef.current) clearTimeout(draftTimerRef.current);
     draftTimerRef.current = setTimeout(async () => {
       if (!bundle) return;
-      const draft = { prompt: prompt.trim(), count };
+      const draft = { prompt: prompt.trim(), count, stylePrompt: stylePrompt.trim() };
       // 先写本地副本（防止 App 被杀后草稿丢失）
       try {
         await AsyncStorage.setItem(`layerive-draft:${projectId}`, JSON.stringify(draft));
@@ -354,7 +377,28 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       } catch { /* 网络失败时保留本地副本 */ }
     }, 900);
     return () => { if (draftTimerRef.current) clearTimeout(draftTimerRef.current); };
-  }, [prompt, count, projectId, bundle]);
+  }, [prompt, count, stylePrompt, projectId, bundle]);
+
+  // 生成比例按项目持久化到 AsyncStorage（本地）：退出重进后恢复上次选择
+  const genSizeLoadedRef = useRef<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    genSizeLoadedRef.current = null;
+    AsyncStorage.getItem(`layerive-gensize:${projectId}`).then((raw) => {
+      if (!alive) return;
+      try {
+        const saved = raw ? (JSON.parse(raw) as { value: string; label: string } | null) : null;
+        setGenSize(saved ?? null);
+      } catch { setGenSize(null); }
+      genSizeLoadedRef.current = projectId;
+    }).catch(() => { genSizeLoadedRef.current = projectId; });
+    return () => { alive = false; };
+  }, [projectId]);
+  // 恢复完成前不回写，避免切项目时把上个项目的比例写进新项目
+  useEffect(() => {
+    if (genSizeLoadedRef.current !== projectId) return;
+    AsyncStorage.setItem(`layerive-gensize:${projectId}`, JSON.stringify(genSize)).catch(() => { /* ignore */ });
+  }, [projectId, genSize]);
 
   // 进入工作台（或 App 重启后重进）恢复进行中/排队中的任务，让队列显示与轮询接上
   useEffect(() => {
@@ -572,6 +616,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     });
     setParentVersionId(version.id);
     setSheet(null);
+    setBottomTab('canvas');
     notify(`已切换到 V${version.number}，可从此版本继续创作`);
   }
 
@@ -602,35 +647,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     runTracked(entry.submit).catch((e) => notify((e as Error).message, 'error'));
   }
 
-  /** 主生成比例选项（原比例优先）与实际下发档位：比例决策在前端，服务端只校验不写死 */
-  const ratioOptions = useMemo(
-    () => generationRatioOptions(imageModel?.provider, currentImage?.width, currentImage?.height),
-    [imageModel?.provider, currentImage?.width, currentImage?.height]
-  );
-  const genSize = useMemo(() => {
-    const provider = imageModel?.provider;
-    if (ratioKey === 'custom') {
-      const [w, h] = customRatioText.split(':').map(Number);
-      return sizeForRatio(provider, w, h);
-    }
-    if (ratioKey === 'original') {
-      return currentImage
-        ? closestSizeForDimensions(provider, currentImage.width, currentImage.height)
-        : defaultSquareSize(provider);
-    }
-    return ratioOptions.find((option) => option.key === ratioKey)?.size || defaultSquareSize(provider);
-  }, [ratioKey, customRatioText, ratioOptions, imageModel?.provider, currentImage]);
-  const genSizeLabel = ratioKey === 'custom'
-    ? (customRatioText || '自定义')
-    : (ratioKey === 'original' && !currentImage ? '默认' : (ratioOptions.find((option) => option.key === ratioKey)?.label ?? '原比例'));
-
   async function submitGenerate() {
     if (!prompt.trim() || activeTask || submittingRef.current) return;
     submittingRef.current = true;
     // 提交前固化输入，失败重试时沿用当时的画布图与父版本
     const input: Record<string, unknown> = {
       prompt: prompt.trim(),
-      params: { count, size: genSize },
+      params: { count, ...(genSizeEffective ? { size: genSizeEffective.value } : {}) },
       visionModelId: activeVisionModel,
     };
     if (currentImage) input.imageId = currentImage.id;
@@ -639,6 +662,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     try {
       await runTracked(() => api.generate(projectId, input));
       setParentVersionId(null);
+      setPrompt(''); // 发送成功后自动清空输入框（失败时保留以便重试）
     } catch (e) {
       notify((e as Error).message, 'error');
     } finally {
@@ -686,8 +710,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       watermark: '视觉模型将先判断并定位水印，再由图片模型修复遮挡区域。继续？',
     } as const;
     const ops = {
-      enhance: () => api.enhance(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel, params: { size: originalImageSize() } }),
-      watermark: () => api.removeWatermark(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel, params: { size: originalImageSize() } }),
+      enhance: () => api.enhance(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel, params: { size: originalSizeFor(currentImage) } }),
+      watermark: () => api.removeWatermark(projectId, { imageId: currentImage.id, visionModelId: activeVisionModel, params: { size: originalSizeFor(currentImage) } }),
     } as const;
     Alert.alert(kind === 'enhance' ? '图片变清晰' : '去水印', tips[kind], [
       { text: '取消', style: 'cancel' },
@@ -703,45 +727,84 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     ]);
   }
 
-  /** 原图比例映射的生成档位：改字/局部/清晰/去水印等必须忠于原图比例的操作使用 */
-  function originalImageSize(): string | undefined {
-    if (!currentImage) return undefined;
-    return closestSizeForDimensions(imageModel?.provider, currentImage.width, currentImage.height);
-  }
-
-  /** 打开扩图 sheet：目标尺寸预置为原图比例的最近档位 */
-  function openOutpaint() {
+  async function submitOutpaint(size: string, direction?: string, hint?: string) {
     if (!currentImage) return;
-    setOutpaintSize(closestSizeForDimensions(imageModel?.provider, currentImage.width, currentImage.height));
-    setOutpaintCustom(false);
-    setOutpaintCustomW('');
-    setOutpaintCustomH('');
-    setOutpaintDir('all');
-    setOutpaintInstruction('');
-    setSheet('outpaint');
-  }
-
-  /** 当前生效的扩图目标尺寸：自定义模式下校验范围，无效返回 null */
-  function effectiveOutpaintSize(): string | null {
-    if (outpaintCustom) {
-      const w = Number(outpaintCustomW), h = Number(outpaintCustomH);
-      if (!w || !h || w < 256 || h < 256 || w > 4096 || h > 4096) return null;
-      return `${Math.round(w)}x${Math.round(h)}`;
-    }
-    return outpaintSize;
-  }
-
-  async function submitOutpaint() {
-    if (!currentImage) return;
-    const size = effectiveOutpaintSize();
-    if (!size) { notify('请选择或输入有效的目标尺寸（256–4096）', 'error'); return; }
-    const input: Record<string, unknown> = { imageId: currentImage.id, size, direction: outpaintDir, visionModelId: activeVisionModel };
-    if (outpaintInstruction.trim()) input.instruction = outpaintInstruction.trim();
+    const imageId = currentImage.id;
     setSheet(null);
     try {
       setBottomTab('chat');
-      await runTracked(() => api.outpaint(projectId, input));
+      await runTracked(() => api.outpaint(projectId, {
+        imageId, size, visionModelId: activeVisionModel,
+        ...(direction ? { direction } : {}),
+        ...(hint ? { hint } : {}),
+      }));
     } catch (e) { notify((e as Error).message, 'error'); }
+  }
+
+  /** 编辑类操作默认跟随原图比例（映射到当前模型支持的最近档位） */
+  function originalSizeFor(image: ProjectImage | null) {
+    return closestSizeForDimensions(imageModel?.provider, image?.width, image?.height);
+  }
+
+  /** 画廊图片导入为项目图片并设为画布：上传后服务端自动将 currentImageId 指向新图 */
+  function handleGallerySetCanvas(asset: LocalEditReference) {
+    setSheet(null);
+    setUploading(true);
+    api.uploadImage(projectId, { data: asset.data, mimeType: asset.mimeType, name: asset.name || 'gallery-image.jpg' })
+      .then((result) => {
+        setBundle(result);
+        setParentVersionId(null);
+        setBottomTab('canvas');
+        notify('画廊图片已设为画布');
+      })
+      .catch((e: Error) => notify(e.message, 'error'))
+      .finally(() => setUploading(false));
+  }
+
+  /** 画廊图片设为局部修改参考图 */
+  function handleGalleryUseReference(asset: LocalEditReference) {
+    setLocalReference(asset);
+    setSheet(null);
+    setSelectMode(null);
+    notify('已设为参考图，可在「局部」修改中使用');
+  }
+
+  /** 生成尺寸生效值：显式选择 > 画布原图比例 > null（不传 size，跟随模型默认） */
+  const genSizeEffective = genSize ?? (currentImage?.width && currentImage?.height
+    ? { value: originalSizeFor(currentImage), label: '原比例' }
+    : null);
+
+  /** 扩图目标尺寸与预览布局：按方向+幅度计算理想画布，再映射到模型支持的档位 */
+  const outpaintPlan = useMemo(() => {
+    const w0 = currentImage?.width || 1024;
+    const h0 = currentImage?.height || 1024;
+    const ex = outDir === 'left' || outDir === 'right' || outDir === 'all' ? outScale : 0;
+    const ey = outDir === 'up' || outDir === 'down' || outDir === 'all' ? outScale : 0;
+    const targetW = Math.round(w0 * (1 + ex));
+    const targetH = Math.round(h0 * (1 + ey));
+    const size = closestSizeForDimensions(imageModel?.provider, targetW, targetH);
+    const [sw, sh] = size.split('x').map(Number);
+    // 画布映射到档位后，原图实际占比（clamp 避免比例偏差导致负值）
+    const innerW = Math.min(sw, (w0 / targetW) * sw);
+    const innerH = Math.min(sh, (h0 / targetH) * sh);
+    const padL = outDir === 'left' ? sw - innerW : outDir === 'all' ? (sw - innerW) / 2 : 0;
+    const padR = outDir === 'right' ? sw - innerW : outDir === 'all' ? (sw - innerW) / 2 : 0;
+    const padT = outDir === 'up' ? sh - innerH : outDir === 'all' ? (sh - innerH) / 2 : 0;
+    const padB = outDir === 'down' ? sh - innerH : outDir === 'all' ? (sh - innerH) / 2 : 0;
+    return { size, sw, sh, padL: (padL / sw) * 100, padR: (padR / sw) * 100, padT: (padT / sh) * 100, padB: (padB / sh) * 100 };
+  }, [currentImage, outDir, outScale, imageModel]);
+
+  function applyCustomSize() {
+    const w = Number(customW);
+    const h = Number(customH);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || w < 256 || h < 256 || w > 4096 || h > 4096) {
+      notify('宽高需在 256-4096 之间', 'error');
+      return;
+    }
+    const value = `${Math.round(w)}x${Math.round(h)}`;
+    setGenSize({ value, label: '自定义' });
+    setSheet(null);
+    notify(`已选择自定义 ${value}`);
   }
 
   async function submitLocalEdit() {
@@ -753,7 +816,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       rect: selectedRect,
       instruction: localInstruction.trim(),
       visionModelId: activeVisionModel,
-      params: { size: originalImageSize() },
+      params: { size: originalSizeFor(currentImage) },
     };
     if (localReference) input.reference = localReference;
     setSheet(null);
@@ -938,29 +1001,6 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
     } catch (e) {
       notify((e as Error).message, 'error');
     }
-  }
-
-  /** 画廊图片导入为项目图片并设为画布：上传后服务端自动将 currentImageId 指向新图 */
-  function handleGallerySetCanvas(asset: LocalEditReference) {
-    setSheet(null);
-    setUploading(true);
-    api.uploadImage(projectId, { data: asset.data, mimeType: asset.mimeType, name: asset.name || 'gallery-image.jpg' })
-      .then((result) => {
-        setBundle(result);
-        setParentVersionId(null);
-        setBottomTab('canvas');
-        notify('画廊图片已设为画布');
-      })
-      .catch((e: Error) => notify(e.message, 'error'))
-      .finally(() => setUploading(false));
-  }
-
-  /** 画廊图片设为局部修改参考图 */
-  function handleGalleryUseReference(asset: LocalEditReference) {
-    setLocalReference(asset);
-    setSheet(null);
-    setSelectMode(null);
-    notify('已设为参考图，可在「局部」修改中使用');
   }
 
   /** 旋转/翻转当前画布图片（本地处理，不上传新版本） */
@@ -1252,28 +1292,16 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       {/* 画布操作栏：上传 / 相机 / 保存（仅画布页显示） */}
       {bottomTab === 'canvas' && (
         <View style={styles.actionBar}>
-          {/* 生成参数：数量/比例（紧凑版），与对话页输入栏共享同一状态 */}
-          <CountSelect value={count} onChange={setCount} colors={colors} compact />
-          <RatioSelect
-            label={genSizeLabel}
-            options={ratioOptions}
-            value={ratioKey}
-            customText={customRatioText}
-            onSelect={setRatioKey}
-            onCustom={() => { setCustomDraft({ w: '16', h: '9' }); setCustomRatioOpen(true); }}
-            colors={colors}
-            compact
-          />
           <Pressable onPress={pickImage} style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]} disabled={uploading}>
-            {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={14} color={colors.text} />}
+            {uploading ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="upload" size={16} color={colors.text} />}
             <Text style={styles.actionText}>上传</Text>
           </Pressable>
           <Pressable onPress={pickCamera} style={({ pressed }) => [styles.actionBtn, pressed && { opacity: 0.7 }]} disabled={uploading}>
-            <Icon name="camera" size={14} color={colors.text} />
+            <Icon name="camera" size={16} color={colors.text} />
             <Text style={styles.actionText}>拍照</Text>
           </Pressable>
           <Pressable onPress={() => void saveCurrentImage()} style={({ pressed }) => [styles.actionBtn, !currentImage && styles.actionBtnDisabled, pressed && { opacity: 0.7 }]} disabled={!currentImage}>
-            <Icon name="download" size={14} color={colors.text} />
+            <Icon name="download" size={16} color={colors.text} />
             <Text style={styles.actionText}>保存</Text>
           </Pressable>
         </View>
@@ -1297,16 +1325,15 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       <View
         ref={canvasWrapRef}
         style={styles.canvasWrap}
-        // 查看模式下：touch handlers 处理双指缩放/单指拖动
-        // 框选模式下：手势由末尾的框选触摸层（panHandlers）处理
-        onTouchStart={handleCanvasTouchStart}
-        onTouchMove={handleCanvasTouchMove}
-        onTouchEnd={handleCanvasTouchEnd}
       >
         {/* 缩放/平移变换层（只含图片，画框在外层保持坐标一致） */}
+        {/* 触摸处理挂在内层：工具条是 wrap 的子元素，挂在 wrap 会因触摸冒泡导致滑动工具条时图片跟着平移 */}
         <View
           style={{ flex: 1, transform: canvasZoom !== 1 || (canvasPan.x !== 0 || canvasPan.y !== 0)
             ? [{ translateX: canvasPan.x }, { translateY: canvasPan.y }, { scale: canvasZoom }] : undefined }}
+          onTouchStart={handleCanvasTouchStart}
+          onTouchMove={handleCanvasTouchMove}
+          onTouchEnd={handleCanvasTouchEnd}
           onLayout={(e) => {
             // 尺寸测量放在内容层：底部工具栏显隐会改变内容区高度，但 wrap 自身尺寸不变、
             // onLayout 不触发，会导致 imageDisplay 用过期尺寸计算、蒙版与图片错位
@@ -1361,6 +1388,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             showsHorizontalScrollIndicator={false}
           >
             <ToolBtn icon="compare" label="对比" colors={colors} disabled={!parentImage} onPress={() => setSheet('compare')} />
+            <ToolBtn icon="crop" label="比例" colors={colors} active={Boolean(genSizeEffective)} onPress={() => setSheet('size')} />
             <ToolBtn icon="rotate" label="旋转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('rotate90')} />
             <ToolBtn icon="flipH" label="翻转" colors={colors} disabled={!currentImage} onPress={() => void transformImage('flipH')} />
             <ToolBtn icon="undo" label="撤销" colors={colors} disabled={!undoStack.length} onPress={undoTransform} />
@@ -1368,7 +1396,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             <ToolBtn icon="text" label="改字" colors={colors} disabled={!currentImage} onPress={() => setSheet('editText')} />
             <ToolBtn icon="region" label="局部" colors={colors} active={selectMode === 'localEdit'} disabled={!currentImage} onPress={() => toggleSelectMode('localEdit')} />
             <ToolBtn icon="crop" label="提取" colors={colors} active={selectMode === 'extract'} disabled={!currentImage} onPress={() => toggleSelectMode('extract')} />
-            <ToolBtn icon="expand" label="扩图" colors={colors} disabled={!currentImage} onPress={openOutpaint} />
+            <ToolBtn icon="expand" label="扩图" colors={colors} disabled={!currentImage} onPress={() => setSheet('outpaint')} />
             <ToolBtn icon="enhance" label="清晰" colors={colors} disabled={!currentImage} onPress={() => runSpecial('enhance')} />
             <ToolBtn icon="droplet" label="去水印" colors={colors} disabled={!currentImage} onPress={() => runSpecial('watermark')} />
           </ScrollView>
@@ -1402,7 +1430,8 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
       ) : null}
       </View>
       ) : (
-        /* 对话页：全高消息列表（最新在底部） */
+        /* 对话页：消息列表与输入栏同容器（flex:1 + minHeight:0），输入栏始终完整可见 */
+        <View style={styles.chatPage}>
         <FlatList
           ref={chatListRef}
           style={styles.chatList}
@@ -1421,6 +1450,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             />
           )}
           onContentSizeChange={() => {
+            // 进入对话页的时间窗内：内容每增长一批就重新定位到底部，保证显示最新消息
+            if (Date.now() < initialScrollDeadlineRef.current) {
+              isNearBottomRef.current = true;
+              prevMsgCountRef.current = messages.length;
+              chatListRef.current?.scrollToEnd({ animated: false });
+              return;
+            }
             // 仅当新消息到达且用户接近底部时才自动滚动，不打断阅读历史
             if (messages.length > prevMsgCountRef.current && isNearBottomRef.current) {
               chatListRef.current?.scrollToEnd({ animated: false });
@@ -1436,6 +1472,74 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           }}
           scrollEventThrottle={16}
         />
+        {/* 输入栏：与消息列表同容器，保证始终完整显示 */}
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.inputBarWrap}>
+          <View style={[styles.inputBar, { paddingBottom: (insets.bottom || 0) + spacing.md }]}>
+            {currentImage ? (
+              <View style={styles.canvasHint}>
+                {imageSource(currentImage.url, 128) ? (
+                  <RemoteImage source={imageSource(currentImage.url, 128)} style={styles.canvasHintThumb} resizeMode="cover" fallbackLabel="图片加载失败" />
+                ) : null}
+                <View style={styles.canvasHintTextWrap}>
+                  <Text style={styles.canvasHintTitle}>正在编辑画布图片</Text>
+                  <Text style={styles.canvasHintMeta} numberOfLines={1}>
+                    {[currentImage.width && currentImage.height ? `${currentImage.width}×${currentImage.height}` : '', '输入描述即可修改'].filter(Boolean).join(' · ')}
+                  </Text>
+                </View>
+              </View>
+            ) : null}
+            {/* 数量/比例/批量创作：常驻显示，展开风格编辑器时由消息列表自动让位 */}
+            <View style={styles.countRow}>
+              <CountSelect value={count} onChange={setCount} colors={colors} />
+              <Pressable style={[styles.batchPill, genSizeEffective && { borderColor: colors.accent }]} onPress={() => setSheet('size')}>
+                <Icon name="crop" size={13} color={colors.accent} />
+                <Text style={styles.batchPillText} numberOfLines={1}>{genSizeEffective ? `${genSizeEffective.label} ${genSizeEffective.value}` : '比例'}</Text>
+              </Pressable>
+              <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
+                <Icon name="batch" size={13} color={colors.accent} />
+                <Text style={styles.batchPillText}>批量创作</Text>
+              </Pressable>
+            </View>
+            {/* 项目风格提示词：可折叠，内容存入 draft，服务端文生图时自动拼接到 prompt */}
+            <Pressable style={styles.styleToggle} onPress={() => setShowStylePrompt((v) => !v)}>
+              <Icon name={showStylePrompt ? 'chevronDown' : 'chevronRight'} size={12} color={colors.muted} />
+              <Text style={styles.styleToggleText}>项目风格提示词</Text>
+              {stylePrompt.trim() ? <Text style={styles.styleBadge}>已设置</Text> : null}
+            </Pressable>
+            {showStylePrompt && (
+              <TextInput
+                style={[styles.input, styles.styleInput]}
+                value={stylePrompt}
+                onChangeText={setStylePrompt}
+                placeholder="例如：扁平插画风格…仅用于文生图时统一风格，改图不会生效。"
+                placeholderTextColor={colors.muted}
+                multiline
+                textAlignVertical="top"
+              />
+            )}
+            <View style={styles.inputRow}>
+              <TextInput
+                style={[styles.input, styles.inputGrow, inputH > 0 && { height: Math.min(inputH + 18, 120) }]}
+                value={prompt}
+                onChangeText={setPrompt}
+                placeholder={currentImage ? '描述你想如何修改这张图片…' : '描述你想生成的图片…'}
+                placeholderTextColor={colors.muted}
+                multiline
+                onContentSizeChange={(e) => setInputH(e.nativeEvent.contentSize.height)}
+              />
+              {activeTask ? (
+                <Pressable style={({ pressed }) => [styles.sendBtn, { backgroundColor: colors.danger }, pressed && { opacity: 0.85 }]} onPress={cancelTask}>
+                  <Icon name="stop" size={16} color="#fff" />
+                </Pressable>
+              ) : (
+                <Pressable style={({ pressed }) => [styles.sendBtn, !prompt.trim() && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={submitGenerate} disabled={!prompt.trim()}>
+                  <Icon name="send" size={16} color="#fff" />
+                </Pressable>
+              )}
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+        </View>
       )}
 
       {/* 候选图条 */}
@@ -1481,111 +1585,6 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           <Text style={[styles.tabText, bottomTab === 'history' && styles.tabTextActive]}>历史</Text>
         </Pressable>
       </View>
-
-      {/* 输入栏：仅对话页显示，避免与画布页重复 */}
-      {bottomTab === 'chat' ? (
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
-        <View style={[styles.inputBar, { paddingBottom: (insets.bottom || 0) + spacing.md }]}>
-          {currentImage ? (
-            <View style={styles.canvasHint}>
-              {imageSource(currentImage.url, 128) ? (
-                <RemoteImage source={imageSource(currentImage.url, 128)} style={styles.canvasHintThumb} resizeMode="cover" fallbackLabel="图片加载失败" />
-              ) : null}
-              <View style={styles.canvasHintTextWrap}>
-                <Text style={styles.canvasHintTitle}>正在编辑画布图片</Text>
-                <Text style={styles.canvasHintMeta} numberOfLines={1}>
-                  {[currentImage.width && currentImage.height ? `${currentImage.width}×${currentImage.height}` : '', '输入描述即可修改'].filter(Boolean).join(' · ')}
-                </Text>
-              </View>
-            </View>
-          ) : null}
-          <View style={styles.countRow}>
-            <CountSelect value={count} onChange={setCount} colors={colors} />
-            <RatioSelect
-              label={genSizeLabel}
-              options={ratioOptions}
-              value={ratioKey}
-              customText={customRatioText}
-              onSelect={setRatioKey}
-              onCustom={() => { setCustomDraft({ w: '16', h: '9' }); setCustomRatioOpen(true); }}
-              colors={colors}
-            />
-            <Pressable style={styles.batchPill} onPress={() => setSheet('batch')}>
-              <Icon name="batch" size={13} color={colors.accent} />
-              <Text style={styles.batchPillText}>批量创作</Text>
-            </Pressable>
-          </View>
-          <View style={styles.inputRow}>
-            <TextInput
-              style={styles.input}
-              value={prompt}
-              onChangeText={setPrompt}
-              placeholder={currentImage ? '描述你想如何修改这张图片…' : '描述你想生成的图片…'}
-              placeholderTextColor={colors.muted}
-              multiline
-              scrollEnabled={false}
-            />
-            {activeTask ? (
-              <Pressable style={({ pressed }) => [styles.sendBtn, { backgroundColor: colors.danger }, pressed && { opacity: 0.85 }]} onPress={cancelTask}>
-                <Icon name="stop" size={16} color="#fff" />
-              </Pressable>
-            ) : (
-              <Pressable style={({ pressed }) => [styles.sendBtn, !prompt.trim() && { opacity: 0.5 }, pressed && { opacity: 0.85 }]} onPress={submitGenerate} disabled={!prompt.trim()}>
-                <Icon name="send" size={16} color="#fff" />
-              </Pressable>
-            )}
-          </View>
-        </View>
-      </KeyboardAvoidingView>
-      ) : null}
-
-      {/* 自定义比例弹窗：输入宽高比，实际下发映射后的最近档位尺寸（画布页/对话页共用） */}
-      <Modal transparent visible={customRatioOpen} animationType="fade" onRequestClose={() => setCustomRatioOpen(false)}>
-        <Pressable style={ratioModalStyles(colors).overlay} onPress={() => setCustomRatioOpen(false)}>
-          <Pressable style={[ratioModalStyles(colors).card, { backgroundColor: colors.card, borderColor: colors.border }]}>
-            <Text style={[ratioModalStyles(colors).title, { color: colors.text }]}>自定义比例</Text>
-            <View style={ratioModalStyles(colors).inputsRow}>
-              <TextInput
-                style={[ratioModalStyles(colors).input, { color: colors.text, borderColor: colors.border }]}
-                value={customDraft.w}
-                onChangeText={(t) => setCustomDraft((d) => ({ ...d, w: t.replace(/[^0-9]/g, '') }))}
-                keyboardType="number-pad"
-                placeholder="宽"
-                placeholderTextColor={colors.muted}
-              />
-              <Text style={[ratioModalStyles(colors).colon, { color: colors.muted }]}>:</Text>
-              <TextInput
-                style={[ratioModalStyles(colors).input, { color: colors.text, borderColor: colors.border }]}
-                value={customDraft.h}
-                onChangeText={(t) => setCustomDraft((d) => ({ ...d, h: t.replace(/[^0-9]/g, '') }))}
-                keyboardType="number-pad"
-                placeholder="高"
-                placeholderTextColor={colors.muted}
-              />
-            </View>
-            <Text style={[ratioModalStyles(colors).preview, { color: colors.muted }]}>
-              实际生成档位：{sizeForRatio(imageModel?.provider, Number(customDraft.w), Number(customDraft.h))}
-            </Text>
-            <View style={ratioModalStyles(colors).btnRow}>
-              <Pressable style={[ratioModalStyles(colors).btn, { borderColor: colors.border }]} onPress={() => setCustomRatioOpen(false)}>
-                <Text style={[ratioModalStyles(colors).btnText, { color: colors.textSecondary }]}>取消</Text>
-              </Pressable>
-              <Pressable
-                style={[ratioModalStyles(colors).btn, { backgroundColor: colors.accent, borderColor: colors.accent }]}
-                onPress={() => {
-                  const w = Number(customDraft.w), h = Number(customDraft.h);
-                  if (!w || !h || w <= 0 || h <= 0) { notify('请输入有效的宽高数值', 'error'); return; }
-                  setCustomRatioText(`${w}:${h}`);
-                  setRatioKey('custom');
-                  setCustomRatioOpen(false);
-                }}
-              >
-                <Text style={[ratioModalStyles(colors).btnText, { color: '#fff' }]}>确定</Text>
-              </Pressable>
-            </View>
-          </Pressable>
-        </Pressable>
-      </Modal>
 
       {/* Sheets */}
       {/* 图片预览：消息图片与画布图片共用（大图 + 出处 + 保存/分享 + 设为画布） */}
@@ -1668,7 +1667,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
             projectId={projectId}
             image={currentImage}
             visionModelId={activeVisionModel}
-            size={originalImageSize()}
+            provider={imageModel?.provider}
             notify={notify}
             onSubmitted={(taskId, editInput) => {
               setSheet(null);
@@ -1707,11 +1706,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         <GalleryModal
           projectId={projectId}
           currentImageId={currentImage?.id || null}
+          visionModelId={activeVisionModel}
           notify={notify}
-          onUse={(usePrompt, stylePrompt) => {
+          onUse={(usePrompt, useStylePrompt) => {
             setPrompt(usePrompt || '');
+            if (useStylePrompt) setStylePrompt(useStylePrompt);
             setSheet(null);
-            notify(stylePrompt ? '提示词已填入（风格提示词已忽略，可在提示词中补充）' : '提示词已填入');
+            notify(useStylePrompt ? '提示词与风格已填入' : '提示词已填入');
           }}
           onSetCanvas={handleGallerySetCanvas}
           onUseReference={handleGalleryUseReference}
@@ -1769,84 +1770,136 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
         </View>
       </ModalSheet>
 
-      {/* Outpaint sheet：方向 + 目标尺寸（预设/自定义）+ 新增区域描述 + 示意预览 */}
+      {/* Outpaint sheet：方向 + 幅度 + 预览 + 内容描述，也可直接选目标尺寸 */}
       <ModalSheet
         visible={sheet === 'outpaint'}
         title="扩图"
         onClose={() => setSheet(null)}
         footer={
-          <Pressable style={styles.primaryBtn} onPress={submitOutpaint}>
-            <Text style={styles.primaryBtnText}>提交扩图</Text>
+          <Pressable style={styles.primaryBtn} onPress={() => submitOutpaint(outpaintPlan.size, outDir, outHint.trim())} disabled={!currentImage}>
+            <Text style={styles.primaryBtnText}>开始扩图（{outpaintPlan.size}）</Text>
           </Pressable>
         }
       >
-        <View style={styles.padBody}>
-          <Text style={styles.fieldLabel}>{OUTPAINT_HINT}</Text>
-          <View>
-            <Text style={styles.fieldLabel}>扩展方向</Text>
-            <View style={styles.dirChipRow}>
-              {OUTPAINT_DIRECTIONS.map((d) => (
-                <Pressable key={d.key} style={[styles.dirChip, outpaintDir === d.key && styles.dirChipActive]} onPress={() => setOutpaintDir(d.key)}>
-                  <Text style={[styles.dirChipText, outpaintDir === d.key && styles.dirChipTextActive]}>{d.label}</Text>
-                </Pressable>
-              ))}
-            </View>
-          </View>
-          <View>
-            <Text style={styles.fieldLabel}>目标画布尺寸</Text>
-            <View style={styles.dirChipRow}>
-              {/* 全量主流比例（不按尺寸去重），chip 上标注实际映射的档位 */}
-              {generationRatioOptions(imageModel?.provider, null, null).map((option) => (
-                <Pressable
-                  key={option.key}
-                  style={[styles.dirChip, !outpaintCustom && outpaintSize === option.size && styles.dirChipActive]}
-                  onPress={() => { setOutpaintSize(option.size); setOutpaintCustom(false); }}
-                >
-                  <Text style={[styles.dirChipText, !outpaintCustom && outpaintSize === option.size && styles.dirChipTextActive]}>
-                    {option.label} {option.size}
-                  </Text>
-                </Pressable>
-              ))}
-              <Pressable style={[styles.dirChip, outpaintCustom && styles.dirChipActive]} onPress={() => setOutpaintCustom(true)}>
-                <Text style={[styles.dirChipText, outpaintCustom && styles.dirChipTextActive]}>自定义</Text>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.padBody} showsVerticalScrollIndicator={false}>
+          {/* 扩展方向 */}
+          <Text style={styles.fieldLabel}>扩展方向</Text>
+          <View style={styles.miniChipRow}>
+            {OUT_DIRS.map((d) => (
+              <Pressable key={d.key} style={[styles.miniChip, outDir === d.key && styles.miniChipActive]} onPress={() => setOutDir(d.key)}>
+                <Text style={[styles.miniChipText, outDir === d.key && styles.miniChipTextActive]}>{d.label}</Text>
               </Pressable>
+            ))}
+          </View>
+          {/* 扩展幅度 */}
+          <Text style={styles.fieldLabel}>扩展幅度</Text>
+          <View style={styles.miniChipRow}>
+            {OUT_SCALES.map((s) => (
+              <Pressable key={s.value} style={[styles.miniChip, outScale === s.value && styles.miniChipActive]} onPress={() => setOutScale(s.value)}>
+                <Text style={[styles.miniChipText, outScale === s.value && styles.miniChipTextActive]}>{s.label}</Text>
+              </Pressable>
+            ))}
+          </View>
+          {/* 预览：虚线区域为新增部分，中心为原图 */}
+          <View style={[styles.outpaintPreview, { aspectRatio: outpaintPlan.sw / outpaintPlan.sh }]}>
+            <View
+              style={{
+                position: 'absolute',
+                top: `${outpaintPlan.padT}%`,
+                bottom: `${outpaintPlan.padB}%`,
+                left: `${outpaintPlan.padL}%`,
+                right: `${outpaintPlan.padR}%`,
+                overflow: 'hidden',
+                borderRadius: radius.sm,
+              }}
+            >
+              {currentImage ? (
+                <RemoteImage source={imageSource(currentImage.url, 480)} style={{ width: '100%', height: '100%' }} resizeMode="cover" fallbackLabel="原图" />
+              ) : null}
             </View>
-            {outpaintCustom ? (
-              <View style={styles.outpaintCustomRow}>
-                <TextInput
-                  style={styles.outpaintCustomInput}
-                  value={outpaintCustomW}
-                  onChangeText={(t) => setOutpaintCustomW(t.replace(/[^0-9]/g, ''))}
-                  keyboardType="number-pad"
-                  placeholder="宽"
-                  placeholderTextColor={colors.muted}
-                />
-                <Text style={{ color: colors.muted }}>×</Text>
-                <TextInput
-                  style={styles.outpaintCustomInput}
-                  value={outpaintCustomH}
-                  onChangeText={(t) => setOutpaintCustomH(t.replace(/[^0-9]/g, ''))}
-                  keyboardType="number-pad"
-                  placeholder="高"
-                  placeholderTextColor={colors.muted}
-                />
-                <Text style={styles.outpaintCustomHint}>256–4096</Text>
-              </View>
+          </View>
+          <Text style={styles.outpaintMeta}>原图 {currentImage?.width || '?'}×{currentImage?.height || '?'} → 目标 {outpaintPlan.size}（浅色边距为新增区域）</Text>
+          {/* 新增区域内容描述 */}
+          <Text style={styles.fieldLabel}>新增区域内容描述（可选）</Text>
+          <TextInput
+            style={styles.instructionInput}
+            value={outHint}
+            onChangeText={setOutHint}
+            placeholder="例如：向上扩展天空和远山，保持黄昏色调"
+            placeholderTextColor={colors.muted}
+            multiline
+          />
+          {/* 直接选目标尺寸（高级） */}
+          <Text style={styles.fieldLabel}>或直接选择目标尺寸</Text>
+          <View style={styles.sizeGrid}>
+            {outpaintPresets(imageModel?.provider, currentImage?.width, currentImage?.height).map((preset) => (
+              <Pressable
+                key={`${preset.label}-${preset.size}`}
+                style={[styles.sizeBtn, preset.original && styles.sizeBtnOriginal]}
+                onPress={() => submitOutpaint(preset.size)}
+              >
+                <Text style={[styles.sizeLabel, preset.original && styles.sizeBtnOriginalText]}>{preset.label}</Text>
+                <Text style={[styles.sizeValue, preset.original && styles.sizeBtnOriginalValue]}>{preset.size}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </ScrollView>
+      </ModalSheet>
+
+      {/* Generation size sheet：原比例 / 主流画幅 / 自定义宽高 */}
+      <ModalSheet visible={sheet === 'size'} title="生成比例" onClose={() => setSheet(null)}>
+        <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.padBody} showsVerticalScrollIndicator={false}>
+          <Text style={styles.fieldLabel}>选择后，本次会话中的生成（文生图/改图）将使用该画幅；不选择时默认跟随画布原图比例（无画布图则跟随模型默认）。所选画幅会自动映射到当前模型支持的最近尺寸档位。</Text>
+          <View style={styles.sizeGrid}>
+            {currentImage && currentImage.width && currentImage.height ? (
+              <Pressable
+                style={[styles.sizeBtn, (!genSize || genSize?.label === '原比例') && styles.sizeBtnSelected]}
+                onPress={() => { const v = originalSizeFor(currentImage); setGenSize({ value: v, label: '原比例' }); setSheet(null); notify(`已选择 原比例 ${v}`); }}
+              >
+                <Text style={[styles.sizeLabel, (!genSize || genSize?.label === '原比例') && styles.sizeBtnOriginalText]}>原比例</Text>
+                <Text style={[styles.sizeValue, (!genSize || genSize?.label === '原比例') && styles.sizeBtnOriginalValue]}>{originalSizeFor(currentImage)}</Text>
+              </Pressable>
             ) : null}
+            {GEN_RATIOS.map((r) => {
+              const v = ratioToSize(imageModel?.provider, r);
+              const active = genSize?.label === r;
+              return (
+                <Pressable key={r} style={[styles.sizeBtn, active && styles.sizeBtnSelected]} onPress={() => { setGenSize({ value: v, label: r }); setSheet(null); notify(`已选择 ${r} ${v}`); }}>
+                  <Text style={[styles.sizeLabel, active && styles.sizeBtnOriginalText]}>{r}</Text>
+                  <Text style={[styles.sizeValue, active && styles.sizeBtnOriginalValue]}>{v}</Text>
+                </Pressable>
+              );
+            })}
           </View>
-          <View>
-            <Text style={styles.fieldLabel}>新增区域内容（可选）</Text>
+          <Text style={styles.fieldLabel}>自定义宽 × 高（像素，256-4096）</Text>
+          <View style={styles.customSizeRow}>
             <TextInput
-              style={styles.instructionInput}
-              value={outpaintInstruction}
-              onChangeText={setOutpaintInstruction}
-              placeholder="如：右侧延伸出一片星空下的森林，保持夜景氛围"
+              style={styles.customSizeInput}
+              value={customW}
+              onChangeText={(v) => setCustomW(v.replace(/[^0-9]/g, ''))}
+              placeholder="宽"
               placeholderTextColor={colors.muted}
-              multiline
+              keyboardType="number-pad"
             />
+            <Text style={styles.customSizeX}>×</Text>
+            <TextInput
+              style={styles.customSizeInput}
+              value={customH}
+              onChangeText={(v) => setCustomH(v.replace(/[^0-9]/g, ''))}
+              placeholder="高"
+              placeholderTextColor={colors.muted}
+              keyboardType="number-pad"
+            />
+            <Pressable style={styles.customSizeApply} onPress={applyCustomSize}>
+              <Text style={styles.customSizeApplyText}>应用</Text>
+            </Pressable>
           </View>
-          <OutpaintPreview image={currentImage} size={effectiveOutpaintSize()} direction={outpaintDir} colors={colors} />
-        </View>
+          {genSize && (
+            <Pressable onPress={() => { setGenSize(null); setCustomW(''); setCustomH(''); setSheet(null); notify('已恢复默认（有画布图时使用原比例）'); }}>
+              <Text style={styles.linkText}>恢复默认</Text>
+            </Pressable>
+          )}
+        </ScrollView>
       </ModalSheet>
 
       {/* Extract hint sheet */}
@@ -1908,13 +1961,13 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
 }
 
 /** 数量下拉选择：替代占宽的四枚按钮，节省输入栏空间 */
-function CountSelect({ value, onChange, colors, compact }: { value: number; onChange: (n: number) => void; colors: ReturnType<typeof useTheme>['colors']; compact?: boolean }) {
+function CountSelect({ value, onChange, colors }: { value: number; onChange: (n: number) => void; colors: ReturnType<typeof useTheme>['colors'] }) {
   const styles = countSelectStyles(colors);
   const [open, setOpen] = useState(false);
   return (
     <View>
       <Pressable style={styles.btn} onPress={() => setOpen(true)}>
-        <Text style={styles.text}>{compact ? `×${value}` : `数量 ×${value}`}</Text>
+        <Text style={styles.text}>数量 ×{value}</Text>
         <Icon name="chevronDown" size={13} color={colors.textSecondary} />
       </Pressable>
       <Modal transparent visible={open} animationType="fade" onRequestClose={() => setOpen(false)}>
@@ -1945,122 +1998,6 @@ const countSelectStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     menu: { width: 220, borderRadius: radius.md, borderWidth: 1, overflow: 'hidden' },
     item: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.md, paddingVertical: 12, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: c.border },
     itemText: { fontSize: fontSize.sm },
-  });
-
-/** 生成比例下拉选择：原比例（默认）/ 主流预设 / 自定义；每项展示实际下发的档位尺寸 */
-function RatioSelect({ label, options, value, customText, onSelect, onCustom, colors, compact }: {
-  label: string;
-  options: { key: string; label: string; size: string }[];
-  value: string;
-  customText: string;
-  onSelect: (key: string) => void;
-  onCustom: () => void;
-  colors: ReturnType<typeof useTheme>['colors'];
-  compact?: boolean;
-}) {
-  const styles = countSelectStyles(colors);
-  const [open, setOpen] = useState(false);
-  return (
-    <View>
-      <Pressable style={styles.btn} onPress={() => setOpen(true)}>
-        <Text style={styles.text}>{compact ? label : `比例 ${label}`}</Text>
-        <Icon name="chevronDown" size={13} color={colors.textSecondary} />
-      </Pressable>
-      <Modal transparent visible={open} animationType="fade" onRequestClose={() => setOpen(false)}>
-        <Pressable style={styles.overlay} onPress={() => setOpen(false)}>
-          <View style={[styles.menu, { backgroundColor: colors.card, borderColor: colors.border }]}>
-            <ScrollView style={{ maxHeight: 420 }}>
-              {options.map((option) => (
-                <Pressable
-                  key={option.key}
-                  style={styles.item}
-                  onPress={() => { onSelect(option.key); setOpen(false); }}
-                >
-                  <Text style={[styles.itemText, { color: value === option.key ? colors.accent : colors.text }]}>{option.label}</Text>
-                  <Text style={{ fontSize: fontSize.xs, color: colors.muted }}>{option.size}</Text>
-                </Pressable>
-              ))}
-              <Pressable style={styles.item} onPress={() => { setOpen(false); onCustom(); }}>
-                <Text style={[styles.itemText, { color: value === 'custom' ? colors.accent : colors.text }]}>自定义比例…</Text>
-                {value === 'custom' && customText ? <Text style={{ fontSize: fontSize.xs, color: colors.muted }}>{customText}</Text> : null}
-              </Pressable>
-            </ScrollView>
-          </View>
-        </Pressable>
-      </Modal>
-    </View>
-  );
-}
-
-/** 扩图示意预览：虚线框为目标画布（按目标比例适配），原图按扩展方向摆放，空白高亮区即新增区域 */
-function OutpaintPreview({ image, size, direction, colors }: {
-  image: { url: string | null; width: number | null; height: number | null } | null;
-  size: string | null;
-  direction: string;
-  colors: ReturnType<typeof useTheme>['colors'];
-}) {
-  const styles = makeStyles(colors);
-  const [box, setBox] = useState({ w: 0, h: 0 });
-  const [tw, th] = (size || '0x0').split('x').map(Number);
-  const valid = tw > 0 && th > 0 && box.w > 0;
-  // 目标画布矩形：适配容器（高 120–210），水平居中
-  const maxH = Math.max(120, Math.min(210, box.h));
-  const ratio = tw / th;
-  let cw = box.w, ch = box.w / ratio;
-  if (ch > maxH) { ch = maxH; cw = maxH * ratio; }
-  const cx = (box.w - cw) / 2;
-  // 原图矩形（画布内坐标）：按方向贴边或居中，异常比例时退化为 contain
-  let ir: { left: number; top: number; width: number; height: number } | null = null;
-  if (image && image.width && image.height && cw > 0) {
-    const r = image.width / image.height;
-    let dw: number, dh: number;
-    if (direction === 'horizontal' || direction === 'left' || direction === 'right') {
-      dh = ch; dw = ch * r;
-      if (dw > cw) { dw = cw; dh = cw / r; }
-    } else if (direction === 'vertical' || direction === 'up' || direction === 'down') {
-      dw = cw; dh = cw / r;
-      if (dh > ch) { dh = ch; dw = ch * r; }
-    } else {
-      if (r > ratio) { dw = cw; dh = cw / r; } else { dh = ch; dw = ch * r; }
-    }
-    let left = (cw - dw) / 2, top = (ch - dh) / 2;
-    if (direction === 'left') left = cw - dw;
-    else if (direction === 'right') left = 0;
-    else if (direction === 'up') top = ch - dh;
-    else if (direction === 'down') top = 0;
-    ir = { left, top, width: dw, height: dh };
-  }
-  return (
-    <View style={{ height: maxH }} onLayout={(e) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height })}>
-      {valid ? (
-        <View style={[styles.outpaintCanvas, { left: cx, top: (box.h - ch) / 2, width: cw, height: ch }]}>
-          {ir && image ? (
-            <Image
-              source={imageSource(image.url, 480)}
-              style={{ position: 'absolute', left: ir.left, top: ir.top, width: ir.width, height: ir.height }}
-              resizeMode="stretch"
-            />
-          ) : null}
-          <Text style={styles.outpaintCanvasTag}>新增区域</Text>
-        </View>
-      ) : null}
-    </View>
-  );
-}
-
-/** 自定义比例弹窗样式 */
-const ratioModalStyles = (c: ReturnType<typeof useTheme>['colors']) =>
-  StyleSheet.create({
-    overlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', alignItems: 'center', justifyContent: 'center' },
-    card: { width: 260, borderRadius: radius.md, borderWidth: 1, padding: spacing.md, gap: spacing.sm },
-    title: { fontSize: fontSize.md, fontWeight: '700' },
-    inputsRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
-    input: { flex: 1, height: 40, borderWidth: 1, borderRadius: radius.sm, paddingHorizontal: spacing.sm, textAlign: 'center' },
-    colon: { fontSize: fontSize.md },
-    preview: { fontSize: fontSize.xs },
-    btnRow: { flexDirection: 'row', gap: spacing.sm },
-    btn: { flex: 1, height: 36, borderRadius: radius.sm, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
-    btnText: { fontSize: fontSize.sm },
   });
 
 
@@ -2278,6 +2215,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     tabBadge: { fontSize: fontSize.xs, color: c.accent, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: 6, paddingVertical: 1, overflow: 'hidden' },
     tabBadgeActive: { color: '#fff', backgroundColor: 'rgba(255,255,255,0.25)' },
     tabDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#fff' },
+    chatPage: { flex: 1, minHeight: 0 },
     chatList: { flex: 1, backgroundColor: c.bg },
     chatListContent: { padding: spacing.md, gap: spacing.sm, paddingBottom: spacing.lg },
     historyPage: { flex: 1, backgroundColor: c.bg },
@@ -2293,12 +2231,16 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     saveBtn: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, borderRadius: radius.sm, backgroundColor: c.accentLight, borderWidth: 1, borderColor: c.accent },
     saveBtnDisabled: { opacity: 0.5 },
     saveBtnText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '700' },
-    actionBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: spacing.sm, paddingVertical: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
-    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingHorizontal: spacing.sm, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
+    actionBar: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-around', paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: c.card, borderBottomWidth: 1, borderBottomColor: c.border },
+    actionBtn: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: spacing.md, paddingVertical: spacing.xs, borderRadius: radius.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border },
     actionBtnDisabled: { opacity: 0.4 },
     actionText: { fontSize: fontSize.xs, color: c.textSecondary, fontWeight: '500' },
     batchPill: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: spacing.sm, paddingVertical: 5, marginLeft: 'auto' },
     batchPillText: { color: c.accent, fontSize: fontSize.xs, fontWeight: '700' },
+    styleToggle: { flexDirection: 'row', alignItems: 'center', gap: 4, paddingBottom: spacing.xs },
+    styleToggleText: { fontSize: fontSize.xs, color: c.muted, fontWeight: '600' },
+    styleBadge: { fontSize: 10, color: c.accent, fontWeight: '700', backgroundColor: c.accentLight, borderRadius: radius.pill, paddingHorizontal: 6, paddingVertical: 1, marginLeft: 4 },
+    styleInput: { minHeight: 52, maxHeight: 80, marginBottom: spacing.sm },
     previewOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.92)', paddingTop: 50, paddingBottom: 30 },
     previewHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: spacing.lg, paddingBottom: spacing.sm },
     previewTitle: { color: '#fff', fontSize: fontSize.sm, fontWeight: '600', flex: 1 },
@@ -2314,8 +2256,10 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     previewUseBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, height: 44, borderRadius: radius.sm, backgroundColor: c.accent },
     previewUseText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '700' },
     inputRow: { flexDirection: 'row', alignItems: 'flex-end', gap: spacing.sm },
-    inputBar: { flexDirection: 'column', padding: spacing.md, backgroundColor: c.card, borderTopWidth: 1, borderTopColor: c.border },
-    input: { flex: 1, minHeight: 40, maxHeight: 80, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, fontSize: fontSize.md, color: c.text, backgroundColor: c.bg },
+    inputBarWrap: { flexShrink: 0 },
+    inputBar: { flexDirection: 'column', flexShrink: 0, padding: spacing.md, backgroundColor: c.card, borderTopWidth: 1, borderTopColor: c.border },
+    input: { minHeight: 40, maxHeight: 80, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, fontSize: fontSize.md, color: c.text, backgroundColor: c.bg },
+    inputGrow: { flex: 1 },
     sendBtn: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, height: 40, paddingHorizontal: spacing.md, borderRadius: radius.md, backgroundColor: c.accent },
     padBody: { padding: spacing.md, gap: spacing.md },
     fieldLabel: { fontSize: fontSize.sm, color: c.textSecondary, fontWeight: '600' },
@@ -2324,19 +2268,31 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     referenceThumb: { width: 48, height: 48, borderRadius: radius.sm, backgroundColor: c.muted },
     referenceText: { flex: 1, color: c.accent, fontSize: fontSize.sm },
     rectNote: { fontSize: fontSize.xs, color: c.muted },
-    dirChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginTop: spacing.xs },
-    dirChip: { paddingHorizontal: spacing.sm, paddingVertical: 5, borderRadius: radius.pill, borderWidth: 1, borderColor: c.border, backgroundColor: c.card },
-    dirChipActive: { backgroundColor: c.accent, borderColor: c.accent },
-    dirChipText: { fontSize: fontSize.xs, color: c.textSecondary },
-    dirChipTextActive: { color: '#fff', fontWeight: '600' },
-    outpaintCustomRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.sm },
-    outpaintCustomInput: { width: 80, height: 40, borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, textAlign: 'center', fontSize: fontSize.md, color: c.text, backgroundColor: c.card },
-    outpaintCustomHint: { fontSize: fontSize.xs, color: c.muted },
-    outpaintCanvas: { position: 'absolute', borderWidth: 1.5, borderStyle: 'dashed', borderRadius: radius.sm, overflow: 'hidden', backgroundColor: c.accentLight, borderColor: c.accent },
-    outpaintCanvasTag: { position: 'absolute', top: 4, left: 4, fontSize: 10, fontWeight: '600', color: c.accent, backgroundColor: 'rgba(255,255,255,0.78)', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1, overflow: 'hidden' },
+    sizeGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+    sizeBtn: { width: '47%', padding: spacing.md, borderRadius: radius.md, borderWidth: 1, borderColor: c.accent, backgroundColor: c.accentLight, alignItems: 'center', gap: 2 },
+    sizeBtnOriginal: { backgroundColor: c.accent },
+    sizeBtnOriginalText: { color: '#fff' },
+    sizeBtnOriginalValue: { color: 'rgba(255,255,255,0.82)' },
+    sizeLabel: { fontSize: fontSize.md, fontWeight: '700', color: c.accent },
+    sizeValue: { fontSize: fontSize.xs, color: c.textSecondary },
+    sizeBtnSelected: { backgroundColor: c.accent },
+    miniChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, marginBottom: spacing.sm },
+    miniChip: { paddingHorizontal: spacing.md, paddingVertical: 6, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, backgroundColor: c.card },
+    miniChipActive: { backgroundColor: c.accent, borderColor: c.accent },
+    miniChipText: { fontSize: fontSize.xs, color: c.muted, fontWeight: '600' },
+    miniChipTextActive: { color: '#fff', fontWeight: '700' },
+    outpaintPreview: { width: '100%', maxWidth: 170, alignSelf: 'center', borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, backgroundColor: c.accentLight, overflow: 'hidden', marginBottom: spacing.xs },
+    outpaintMeta: { fontSize: fontSize.xs, color: c.muted, textAlign: 'center', marginBottom: spacing.sm },
+    customSizeRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginBottom: spacing.sm },
+    customSizeInput: { flex: 1, height: 42, borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, backgroundColor: c.card, paddingHorizontal: spacing.md, fontSize: fontSize.md, color: c.text },
+    customSizeX: { color: c.muted, fontSize: fontSize.md },
+    customSizeApply: { paddingHorizontal: spacing.lg, height: 42, borderRadius: radius.sm, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
+    customSizeApplyText: { color: '#fff', fontWeight: '700', fontSize: fontSize.sm },
+    linkText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '600', textAlign: 'center', paddingVertical: spacing.sm },
     primaryBtn: { height: 46, borderRadius: radius.md, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
     primaryBtnText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
-    busyOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
+    // 顶部显示：与 App 级提示一致，避免遮挡画布底部工具栏
+    busyOverlay: { position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'flex-start', paddingTop: 160 },
     busyCard: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
     busyText: { color: c.text, fontSize: fontSize.sm },
     failedBar: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.md, paddingVertical: spacing.sm, backgroundColor: `${c.danger}14`, borderTopWidth: 1, borderTopColor: `${c.danger}33` },

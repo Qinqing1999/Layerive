@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
-import { API_BASE, type BatchEditProgress, type BatchEditResult, type GenerateResult, type GenerationTask, type GalleryEntryItem, type ModelsPayload, type Project, type ProjectBundle, type TextSegment } from './types';
+import { API_BASE, type BatchEditProgress, type BatchEditResult, type GenerateResult, type GenerationTask, type GalleryEntryItem, type ModelConfig, type ModelsPayload, type Project, type ProjectBundle, type TextSegment, type AdminSettings, type AdminUser } from './types';
 
 const AUTH_TOKEN_KEY = 'pixelforge-auth-token';
 const SERVER_BASE_KEY = 'pixelforge-server-base';
@@ -275,11 +275,14 @@ export const api = {
 
   gallery: () => request<{ entries: GalleryEntryItem[] }>('/api/gallery'),
 
-  galleryAdd: (input: { title: string; prompt: string; stylePrompt?: string; category?: string }) =>
+  galleryAdd: (input: { title: string; prompt: string; stylePrompt?: string; category?: string; image?: { data: string; mimeType: string } | null }) =>
     request<{ entry: GalleryEntryItem }>('/api/gallery', { method: 'POST', body: { category: 'mine', ...input } }),
 
   galleryFromImage: (projectId: string, imageId: string) =>
     request<{ entry: GalleryEntryItem }>('/api/gallery/from-image', { method: 'POST', body: { projectId, imageId } }),
+
+  analyzeGalleryImage: (input: { data: string; mimeType: string; visionModelId?: string }) =>
+    request<{ title: string; prompt: string; stylePrompt: string }>('/api/gallery/analyze', { method: 'POST', body: input }),
 
   galleryUpdate: (id: string, input: Partial<{ title: string; prompt: string; stylePrompt: string; category: string }>) =>
     request<{ entry: GalleryEntryItem }>(`/api/gallery/${id}`, { method: 'PATCH', body: input }),
@@ -291,6 +294,45 @@ export const api = {
     request<GenerateResult>(`/api/projects/${id}/local-edit-batch`, { method: 'POST', body: input }),
 
   models: () => request<ModelsPayload>('/api/models'),
+
+  createModel: (input: Partial<ModelConfig>) =>
+    request<{ model: ModelConfig }>('/api/models', { method: 'POST', body: input }),
+
+  updateModel: (id: string, input: Partial<ModelConfig>) =>
+    request<{ model: ModelConfig }>(`/api/models/${id}`, { method: 'PATCH', body: input }),
+
+  revealModelApiKey: (id: string) =>
+    request<{ apiKey: string }>(`/api/models/${id}/api-key`, { method: 'POST' }),
+
+  deleteModel: (id: string) =>
+    request<{ ok: boolean }>(`/api/models/${id}`, { method: 'DELETE' }),
+
+  activateModel: (id: string) =>
+    request<{ ok: boolean }>(`/api/models/${id}/activate`, { method: 'POST' }),
+
+  activateVisionModel: (id: string) =>
+    request<{ ok: boolean }>(`/api/models/${id}/activate-vision`, { method: 'POST' }),
+
+  testModel: (id: string) =>
+    request<{ ok: boolean; latency: number; message: string }>(`/api/models/${id}/test`, { method: 'POST' }),
+
+  testModelConfig: (input: Partial<ModelConfig>) =>
+    request<{ ok: boolean; latency: number; message: string }>('/api/models/test-config', { method: 'POST', body: input }),
+
+  restoreBackup: (base64Data: string) =>
+    request<{ ok: boolean; restartRequired: boolean; safetyBackup: string }>('/api/backup/restore', { method: 'POST', body: { data: base64Data } }),
+
+  // ---- 管理后台（仅管理员，服务端 requireAdmin 校验） ----
+  adminUsers: () => request<{ users: AdminUser[] }>('/api/admin/users'),
+  createAdminUser: (input: { username: string; password: string; role: 'admin' | 'user' }) =>
+    request<{ user: AdminUser }>('/api/admin/users', { method: 'POST', body: input }),
+  updateAdminUser: (username: string, input: { password?: string; role?: 'admin' | 'user' }) =>
+    request<{ user: AdminUser }>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'PATCH', body: input }),
+  deleteAdminUser: (username: string) =>
+    request<{ ok: boolean }>(`/api/admin/users/${encodeURIComponent(username)}`, { method: 'DELETE' }),
+  adminSettings: () => request<AdminSettings>('/api/admin/settings'),
+  updateAdminSettings: (input: Partial<AdminSettings>) =>
+    request<AdminSettings>('/api/admin/settings', { method: 'PUT', body: input }),
 };
 
 // Resolve relative image URLs to absolute

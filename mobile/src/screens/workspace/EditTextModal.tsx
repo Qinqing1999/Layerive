@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '../../api';
+import { closestSizeForDimensions } from '../../sizes';
 import { useTheme } from '../../theme';
 import { fontSize, radius, spacing } from '../../theme';
 import type { ProjectImage, TextSegment } from '../../types';
@@ -10,15 +11,14 @@ type Props = {
   projectId: string;
   image: ProjectImage;
   visionModelId: string;
-  /** 生成尺寸档位（原图比例映射），保证改字输出与原图同比例 */
-  size?: string;
+  provider?: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onSubmitted: (taskId: string, editInput: Record<string, unknown>) => void;
   onCancel: () => void;
 };
 
 /** Recognized-text editor: load segments, edit / delete / add, then submit edit-text task. */
-export function EditTextModal({ projectId, image, visionModelId, size, notify, onSubmitted, onCancel }: Props) {
+export function EditTextModal({ projectId, image, visionModelId, provider, notify, onSubmitted, onCancel }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [loading, setLoading] = useState(true);
@@ -90,6 +90,8 @@ export function EditTextModal({ projectId, image, visionModelId, size, notify, o
       const editInput: Record<string, unknown> = {
         imageId: image.id,
         visionModelId,
+        // 默认跟随原图比例（映射到当前模型支持的最近档位），避免改字后变成方形
+        params: { size: closestSizeForDimensions(provider, image.width, image.height) },
         segments: changed.map((seg) => ({
           originalText: seg.originalText,
           text: seg.text,
@@ -98,7 +100,6 @@ export function EditTextModal({ projectId, image, visionModelId, size, notify, o
           rect: seg.rect || null,
         })),
       };
-      if (size) editInput.params = { size };
       const result = await api.editText(projectId, editInput);
       onSubmitted(result.taskId, editInput);
     } catch (e) {
