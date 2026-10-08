@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { ActivityIndicator, Alert, FlatList, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, StyleSheet, Text, TextInput, View } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import { RemoteImage } from '../../components/RemoteImage';
 import { api, imageSource } from '../../api';
 import { useTheme } from '../../theme';
@@ -10,6 +11,7 @@ import { Icon } from '../../components/Icon';
 type Props = {
   projectId: string;
   currentImageId: string | null;
+  visionModelId?: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onUse: (prompt: string, stylePrompt: string) => void;
 };
@@ -26,12 +28,14 @@ const CATEGORY_LABELS: Record<string, string> = {
 const CATEGORIES = ['mine', 'portrait', 'scene', 'product', 'style', 'other'];
 
 /** Prompt gallery: tap an entry to fill the prompt box; save the canvas image as a new entry. */
-export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props) {
+export function GalleryModal({ projectId, currentImageId, visionModelId, notify, onUse }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [entries, setEntries] = useState<GalleryEntryItem[] | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
   const [filter, setFilter] = useState<string>('all');
   const [editTarget, setEditTarget] = useState<GalleryEntryItem | null>(null);
   const [editTitle, setEditTitle] = useState('');
@@ -39,13 +43,16 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
   const [editStyle, setEditStyle] = useState('');
   const [editCategory, setEditCategory] = useState('mine');
   const [editBusy, setEditBusy] = useState(false);
+  const [analyzeResult, setAnalyzeResult] = useState<{ title: string; prompt: string; stylePrompt: string; imageData?: string; imageMime?: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
       const data = await api.gallery();
       setEntries(data.entries || []);
+      setLoadError(null);
     } catch (e) {
-      notify((e as Error).message, 'error');
+      // 失败原因直接显示在列表区（不只靠 toast），并提供重试入口
+      setLoadError((e as Error).message);
       setEntries([]);
     }
   }, [notify]);
@@ -71,6 +78,60 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
       notify((e as Error).message, 'error');
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function analyzeFromAlbum() {
+    if (analyzing) return;
+    try {
+      const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!permission.granted) { notify('需要相册权限才能选图', 'error'); return; }
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images'],
+        quality: 0.85,
+        base64: true,
+      });
+      const asset = result.assets?.[0];
+      if (!asset?.base64) return;
+      setAnalyzing(true);
+      const mimeType = asset.mimeType || 'image/jpeg';
+      const data = await api.analyzeGalleryImage({
+        data: asset.base64,
+        mimeType,
+        visionModelId,
+      });
+      setAnalyzeResult({
+        title: data.title || '',
+        prompt: data.prompt || '',
+        stylePrompt: data.stylePrompt || '',
+        imageData: asset.base64,
+        imageMime: mimeType,
+      });
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setAnalyzing(false);
+    }
+  }
+
+  async function submitAnalyzeResult() {
+    if (!analyzeResult) return;
+    setEditBusy(true);
+    try {
+      await api.galleryAdd({
+        title: analyzeResult.title || '未命名',
+        prompt: analyzeResult.prompt,
+        stylePrompt: analyzeResult.stylePrompt,
+        category: 'mine',
+        image: analyzeResult.imageData ? { data: analyzeResult.imageData, mimeType: analyzeResult.imageMime || 'image/jpeg' } : null,
+      });
+      setAnalyzeResult(null);
+      await load();
+      notify('已添加到画廊');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally {
+      setEditBusy(false);
     }
   }
 
@@ -119,10 +180,16 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
 
   return (
     <View style={styles.container}>
-      <Pressable style={[styles.saveBtn, (!currentImageId || saving) && { opacity: 0.5 }]} onPress={saveCurrentImage} disabled={!currentImageId || saving}>
-        {saving ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="gallery" size={16} color={colors.accent} />}
-        <Text style={styles.saveText}>收藏当前画布图片（自动提炼提示词）</Text>
-      </Pressable>
+      <View style={styles.actionRow}>
+        <Pressable style={[styles.saveBtn, (!currentImageId || saving) && { opacity: 0.5 }]} onPress={saveCurrentImage} disabled={!currentImageId || saving}>
+          {saving ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="gallery" size={16} color={colors.accent} />}
+          <Text style={styles.saveText}>收藏画布图片</Text>
+        </Pressable>
+        <Pressable style={[styles.saveBtn, analyzing && { opacity: 0.5 }]} onPress={analyzeFromAlbum} disabled={analyzing}>
+          {analyzing ? <ActivityIndicator size="small" color={colors.accent} /> : <Icon name="camera" size={16} color={colors.accent} />}
+          <Text style={styles.saveText}>从相册蒸馏提示词</Text>
+        </Pressable>
+      </View>
       <View style={styles.filterRow}>
         {FILTERS.map((f) => (
           <Pressable
@@ -145,7 +212,25 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
           maxToRenderPerBatch={6}
           windowSize={5}
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={async () => { setRefreshing(true); await load(); setRefreshing(false); }} tintColor={colors.accent} />}
-          ListEmptyComponent={<Text style={styles.empty}>{filter === 'all' ? '画廊暂无条目' : '该分类下暂无条目'}</Text>}
+          ListEmptyComponent={
+            loadError ? (
+              <View style={styles.errorWrap}>
+                <Icon name="warning" size={32} color={colors.border} />
+                <Text style={styles.errorText}>画廊数据加载失败：{loadError}</Text>
+                <Pressable
+                  style={({ pressed }) => [styles.retryBtn, pressed && { opacity: 0.7 }]}
+                  onPress={() => { setEntries(null); void load(); }}
+                >
+                  <Text style={styles.retryText}>重新加载</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <View style={styles.emptyWrap}>
+                <Icon name="gallery" size={40} color={colors.border} />
+                <Text style={styles.empty}>{filter === 'all' ? '画廊暂无条目' : '该分类下暂无条目'}</Text>
+                <Text style={styles.emptyHint}>用顶部按钮收藏画布图片，或从相册选图蒸馏提示词</Text>
+              </View>
+            )}
           renderItem={({ item }: { item: GalleryEntryItem }) => (
             <View style={styles.card}>
               <Pressable style={styles.cardMain} onPress={() => onUse(item.prompt, item.stylePrompt)}>
@@ -205,6 +290,29 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Analyze Result Modal */}
+      <Modal visible={Boolean(analyzeResult)} animationType="fade" transparent>
+        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.modalOverlay}>
+          <View style={styles.modalCard}>
+            <Text style={styles.modalTitle}>蒸馏结果</Text>
+            <Text style={styles.fieldLabel}>标题</Text>
+            <TextInput style={styles.modalInput} value={analyzeResult?.title || ''} onChangeText={(v) => setAnalyzeResult((r) => r ? { ...r, title: v } : r)} placeholder="标题" placeholderTextColor={colors.muted} />
+            <Text style={styles.fieldLabel}>提示词</Text>
+            <TextInput style={[styles.modalInput, styles.modalTextarea]} value={analyzeResult?.prompt || ''} onChangeText={(v) => setAnalyzeResult((r) => r ? { ...r, prompt: v } : r)} placeholder="提示词" placeholderTextColor={colors.muted} multiline numberOfLines={3} />
+            <Text style={styles.fieldLabel}>风格提示词</Text>
+            <TextInput style={styles.modalInput} value={analyzeResult?.stylePrompt || ''} onChangeText={(v) => setAnalyzeResult((r) => r ? { ...r, stylePrompt: v } : r)} placeholder="风格提示词（可选）" placeholderTextColor={colors.muted} />
+            <View style={styles.modalActions}>
+              <Pressable style={styles.modalCancel} onPress={() => setAnalyzeResult(null)}>
+                <Text style={styles.modalCancelText}>取消</Text>
+              </Pressable>
+              <Pressable style={[styles.modalSubmit, editBusy && { opacity: 0.5 }]} onPress={submitAnalyzeResult} disabled={editBusy}>
+                {editBusy ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.modalSubmitText}>添加到画廊</Text>}
+              </Pressable>
+            </View>
+          </View>
+        </KeyboardAvoidingView>
+      </Modal>
     </View>
   );
 }
@@ -212,7 +320,8 @@ export function GalleryModal({ projectId, currentImageId, notify, onUse }: Props
 const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
   StyleSheet.create({
     container: { flex: 1 },
-    saveBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, margin: spacing.md, padding: spacing.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: c.accent, borderRadius: radius.md },
+    actionRow: { flexDirection: 'row', gap: spacing.sm, margin: spacing.md },
+    saveBtn: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, padding: spacing.sm, borderWidth: 1, borderStyle: 'dashed', borderColor: c.accent, borderRadius: radius.md },
     saveText: { color: c.accent, fontSize: fontSize.sm, fontWeight: '600' },
     filterRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs, paddingHorizontal: spacing.md, paddingBottom: spacing.sm },
     filterChip: { paddingHorizontal: spacing.sm, paddingVertical: 4, borderRadius: radius.sm, borderWidth: 1, borderColor: c.border, backgroundColor: c.card },
@@ -222,6 +331,12 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     loading: { flex: 1, alignItems: 'center', justifyContent: 'center' },
     list: { padding: spacing.md, paddingTop: 0, paddingBottom: spacing.xxl, gap: spacing.sm },
     empty: { textAlign: 'center', color: c.muted, marginTop: spacing.xl },
+  emptyWrap: { alignItems: 'center', gap: spacing.sm, marginTop: spacing.xxl },
+  emptyHint: { textAlign: 'center', color: c.muted, fontSize: fontSize.xs, paddingHorizontal: spacing.xl },
+    errorWrap: { alignItems: 'center', gap: spacing.sm, paddingVertical: spacing.xl, paddingHorizontal: spacing.lg },
+    errorText: { color: c.muted, fontSize: fontSize.sm, textAlign: 'center', lineHeight: 20 },
+    retryBtn: { paddingHorizontal: spacing.lg, paddingVertical: spacing.sm, borderRadius: radius.md, backgroundColor: c.accent },
+    retryText: { color: '#fff', fontSize: fontSize.sm, fontWeight: '600' },
     card: { backgroundColor: c.card, borderWidth: 1, borderColor: c.border, borderRadius: radius.md, padding: spacing.sm },
     cardMain: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm },
     cardActions: { flexDirection: 'row', gap: spacing.md, marginTop: spacing.sm, paddingTop: spacing.sm, borderTopWidth: 1, borderTopColor: c.border },

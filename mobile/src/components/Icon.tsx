@@ -108,6 +108,7 @@ const ICON_MAP: Record<string, keyof typeof Ionicons.glyphMap> = {
   eyeOff: 'eye-off',
   more: 'ellipsis-horizontal',
   rotate: 'refresh-outline',
+  warning: 'alert-circle',
   flipH: 'swap-horizontal',
   flipV: 'swap-vertical',
   undo: 'arrow-undo',

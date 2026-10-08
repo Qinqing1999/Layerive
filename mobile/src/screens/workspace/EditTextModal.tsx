@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, FlatList, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { api } from '../../api';
+import { closestSizeForDimensions } from '../../sizes';
 import { useTheme } from '../../theme';
 import { fontSize, radius, spacing } from '../../theme';
 import type { ProjectImage, TextSegment } from '../../types';
@@ -10,13 +11,14 @@ type Props = {
   projectId: string;
   image: ProjectImage;
   visionModelId: string;
+  provider?: string;
   notify: (message: string, kind?: 'success' | 'error') => void;
   onSubmitted: (taskId: string, editInput: Record<string, unknown>) => void;
   onCancel: () => void;
 };
 
 /** Recognized-text editor: load segments, edit / delete / add, then submit edit-text task. */
-export function EditTextModal({ projectId, image, visionModelId, notify, onSubmitted, onCancel }: Props) {
+export function EditTextModal({ projectId, image, visionModelId, provider, notify, onSubmitted, onCancel }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [loading, setLoading] = useState(true);
@@ -88,6 +90,8 @@ export function EditTextModal({ projectId, image, visionModelId, notify, onSubmi
       const editInput = {
         imageId: image.id,
         visionModelId,
+        // 默认跟随原图比例（映射到当前模型支持的最近档位），避免改字后变成方形
+        params: { size: closestSizeForDimensions(provider, image.width, image.height) },
         segments: changed.map((seg) => ({
           originalText: seg.originalText,
           text: seg.text,

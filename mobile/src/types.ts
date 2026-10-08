@@ -152,3 +152,6 @@ export type GalleryEntryItem = {
 };
 
 export type LocalEditReference = { data: string; mimeType: string; name?: string };
+
+export type AdminUser = { username: string; role: 'admin' | 'user' };
+export type AdminSettings = { queueConcurrency: number };

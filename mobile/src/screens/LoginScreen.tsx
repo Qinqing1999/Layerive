@@ -7,7 +7,7 @@ import { fontSize, radius, spacing } from '../theme';
 import { Icon } from '../components/Icon';
 
 type Props = {
-  onSuccess: () => void;
+  onSuccess: (username: string, role: 'admin' | 'user') => void;
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
@@ -34,7 +34,7 @@ export function LoginScreen({ onSuccess, notify }: Props) {
       if (trimmed && trimmed !== getServerBase()) await setServerBase(trimmed);
       const result = await api.login(username.trim(), password);
       await setAuthToken(result.token);
-      onSuccess();
+      onSuccess(result.username, result.role);
     } catch (error) {
       setFormError((error as Error).message);
       notify((error as Error).message, 'error');

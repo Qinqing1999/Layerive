@@ -10,9 +10,10 @@ import { Icon } from './components/Icon';
 import { LoginScreen } from './screens/LoginScreen';
 import { HomeScreen } from './screens/HomeScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
+import { ModelsScreen } from './screens/ModelsScreen';
 
 type AuthState = 'checking' | 'guest' | 'authed';
-type ScreenView = { name: 'home' } | { name: 'workspace'; projectId: string };
+type ScreenView = { name: 'home' } | { name: 'workspace'; projectId: string } | { name: 'models' };
 
 type Toast = { message: string; kind: 'success' | 'error' };
 
@@ -28,6 +29,8 @@ function AppShell() {
   const [activeVisionModel, setActiveVisionModel] = useState('');
   const [loading, setLoading] = useState(true);
   const [offline, setOffline] = useState(false);
+  const [userRole, setUserRole] = useState<string>('user');
+  const [username, setUsername] = useState('');
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => {
@@ -58,7 +61,7 @@ function AppShell() {
       if (!token) { setAuthState('guest'); return; }
       try {
         const r = await api.checkAuth();
-        if (r.authenticated) { setAuthState('authed'); await loadAll(); }
+        if (r.authenticated) { setUserRole(r.role || 'user'); setUsername(r.username || ''); setAuthState('authed'); await loadAll(); }
         else setAuthState('guest');
       } catch {
         setAuthState('guest');
@@ -90,7 +93,9 @@ function AppShell() {
     return () => setConnectionRetryHandler(null);
   }, [loadAll]);
 
-  const onLoginSuccess = useCallback(async () => {
+  const onLoginSuccess = useCallback(async (name: string, role: 'admin' | 'user') => {
+    setUsername(name);
+    setUserRole(role);
     setAuthState('authed');
     setLoading(true);
     await loadAll();
@@ -100,6 +105,7 @@ function AppShell() {
     try { await api.logout(); } catch { /* ignore */ }
     await clearAuthToken();
     setAuthState('guest');
+    setUserRole('user');
     setProjects([]);
     setModels([]);
   }, []);
@@ -136,10 +142,12 @@ function AppShell() {
         <HomeScreen
           projects={projects}
           loading={loading}
+          isAdmin={userRole === 'admin'}
           onOpen={(id: string) => setView({ name: 'workspace', projectId: id })}
           onCreate={createProject}
           onRefresh={refreshProjects}
           onLogout={onLogout}
+          onOpenModels={() => setView({ name: 'models' })}
           notify={notify}
         />
       )}
@@ -151,6 +159,24 @@ function AppShell() {
           activeVisionModel={activeVisionModel}
           onBack={() => { setView({ name: 'home' }); void refreshProjects(); }}
           notify={notify}
+        />
+      )}
+      {view.name === 'models' && (
+        <ModelsScreen
+          models={models}
+          activeModel={activeModel}
+          activeVisionModel={activeVisionModel}
+          onBack={() => setView({ name: 'home' })}
+          onRefresh={async () => {
+            try {
+              const modelData = await api.models();
+              setModels(modelData.models);
+              setActiveModel(modelData.activeModel);
+              setActiveVisionModel(modelData.activeVisionModel);
+            } catch { /* ignore */ }
+          }}
+          notify={notify}
+          currentUsername={username}
         />
       )}
       {toast && <ToastView toast={toast} colors={colors} />}
@@ -240,7 +266,8 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
 
 const toastStyles = StyleSheet.create({
   toast: {
-    position: 'absolute', bottom: 80, left: spacing.lg, right: spacing.lg,
+    // 顶部显示：避免遮挡画布底部工具栏/输入栏
+    position: 'absolute', top: 100, left: spacing.lg, right: spacing.lg,
     padding: spacing.md, borderRadius: radius.md,
     borderWidth: 1, borderColor: 'transparent', flexDirection: 'row',
     alignItems: 'center', gap: spacing.sm, elevation: 10,
