@@ -3,7 +3,7 @@ import { Platform } from 'react-native';
 // 服务端地址 - 开发时用本机 IP，生产时由 AsyncStorage 持久化的用户设置覆盖
 export const API_BASE = __DEV__
   ? Platform.OS === 'android'
-    ? 'http://192.168.43.146:8788'  // Android 模拟器/真机（开发机 LAN IP）
+    ? 'http://10.0.2.2:8788'  // Android 模拟器（10.0.2.2 为模拟器访问宿主机专用地址；真机可在登录页手动输入电脑 LAN IP）
     : 'http://127.0.0.1:8788'  // iOS 模拟器
   : 'http://192.168.43.146:8788'; // 生产环境
 
@@ -182,6 +182,8 @@ export type UserProfile = {
   vipExpiresAt: string | null;
   remainingQuota: number; // Infinity 表示无限制
   watermark: WatermarkConfig;
+  adEnabled?: boolean; // 看广告获取次数功能是否开启
+  adCredits?: number; // 每次看广告可获得的次数
 };
 
 export type WatermarkSaveResult = {

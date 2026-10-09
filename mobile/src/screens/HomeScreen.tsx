@@ -32,13 +32,14 @@ type Props = {
   onRefresh: () => Promise<void>;
   onLogout: () => void;
   onOpenModels: () => void;
+  onOpenProfile: () => void;
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
 const formatUpdated = (value: string) =>
   new Intl.DateTimeFormat('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }).format(new Date(value));
 
-export function HomeScreen({ projects, loading, isAdmin, onOpen, onCreate, onRefresh, onLogout, onOpenModels, notify }: Props) {
+export function HomeScreen({ projects, loading, isAdmin, onOpen, onCreate, onRefresh, onLogout, onOpenModels, onOpenProfile, notify }: Props) {
   const { colors, mode, toggle } = useTheme();
   const insets = useSafeAreaInsets();
   const styles = makeStyles(colors);
@@ -352,6 +353,7 @@ export function HomeScreen({ projects, loading, isAdmin, onOpen, onCreate, onRef
             {isAdmin && (
               <MenuItem icon="models" label="模型管理" colors={colors} onPress={() => { setMenuVisible(false); onOpenModels(); }} />
             )}
+            <MenuItem icon="person" label="个人中心" colors={colors} onPress={() => { setMenuVisible(false); onOpenProfile(); }} />
             <MenuItem icon="import" label="导入项目 ZIP" colors={colors} onPress={() => { setMenuVisible(false); void importProject(); }} />
             <MenuItem icon="zip" label="下载完整备份" colors={colors} onPress={() => { setMenuVisible(false); void downloadBackup(); }} />
             <MenuItem icon="data" label="从备份恢复" colors={colors} onPress={() => { setMenuVisible(false); void restoreBackup(); }} />

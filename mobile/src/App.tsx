@@ -11,9 +11,10 @@ import { LoginScreen } from './screens/LoginScreen';
 import { HomeScreen } from './screens/HomeScreen';
 import { WorkspaceScreen } from './screens/WorkspaceScreen';
 import { ModelsScreen } from './screens/ModelsScreen';
+import { ProfileScreen } from './screens/ProfileScreen';
 
 type AuthState = 'checking' | 'guest' | 'authed';
-type ScreenView = { name: 'home' } | { name: 'workspace'; projectId: string } | { name: 'models' };
+type ScreenView = { name: 'home' } | { name: 'workspace'; projectId: string } | { name: 'models' } | { name: 'profile' };
 
 type Toast = { message: string; kind: 'success' | 'error' };
 
@@ -124,6 +125,15 @@ function AppShell() {
 
   const refreshProjects = useCallback(async () => { await loadAll(); }, [loadAll]);
 
+  // 看广告获得免水印次数：API 成功后用返回的最新剩余次数刷新本地 profile
+  const onWatchAd = useCallback(async () => {
+    try {
+      const result = await api.watchAd();
+      setUserProfile((prev) => (prev ? { ...prev, remainingQuota: result.remainingQuota } : prev));
+      notify(`获得 ${result.credits} 次免水印机会`);
+    } catch (e) { notify((e as Error).message, 'error'); }
+  }, [notify]);
+
   async function createProject(input: { name: string; description: string }) {
     try {
       const bundle = await api.createProject(input);
@@ -160,6 +170,7 @@ function AppShell() {
           onRefresh={refreshProjects}
           onLogout={onLogout}
           onOpenModels={() => setView({ name: 'models' })}
+          onOpenProfile={() => setView({ name: 'profile' })}
           notify={notify}
         />
       )}
@@ -190,6 +201,16 @@ function AppShell() {
           }}
           notify={notify}
           currentUsername={username}
+        />
+      )}
+      {view.name === 'profile' && (
+        <ProfileScreen
+          username={username}
+          userProfile={userProfile}
+          onBack={() => setView({ name: 'home' })}
+          onRefresh={refreshProjects}
+          onWatchAd={onWatchAd}
+          onLogout={onLogout}
         />
       )}
       {toast && <ToastView toast={toast} colors={colors} />}

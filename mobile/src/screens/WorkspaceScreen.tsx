@@ -1036,7 +1036,7 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
           onPress: async () => {
             try {
               setBusyLabel('正在获取无水印原图…');
-              const result = await api.watermarkSave(bundle.project.current_version_id || '');
+              const result = await api.watermarkSave(bundle.project.currentVersionId || '');
               // 更新本地 userProfile 剩余次数
               if (userProfile) {
                 userProfile.remainingQuota = result.remainingQuota;

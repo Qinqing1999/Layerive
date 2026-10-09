@@ -222,6 +222,9 @@ export function getUserProfile(username, settings) {
     vipExpiresAt: user.vipExpiresAt,
     remainingQuota: getRemainingQuota(user, settings),
     watermark: resolveWatermark(settings),
+    // 广告配置透传给个人中心，用于展示/隐藏「看广告得次数」入口
+    adEnabled: Boolean(settings?.quota?.adEnabled),
+    adCredits: Number(settings?.quota?.defaultAdCredits) || 1,
   };
 }
 
