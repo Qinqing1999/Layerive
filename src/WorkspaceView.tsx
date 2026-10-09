@@ -20,6 +20,8 @@ type Props = {
 };
 type TaskKind = 'generate' | 'batch-edit' | 'text-edit' | 'local-edit' | 'outpaint' | 'enhance' | 'remove-watermark' | 'extract-asset';
 const localEditStages = { planning: '视觉模型正在理解选区与修改意图、定位主体…', compositing: '正在裁剪参考主体并合成到目标位置…', generating: '图片模型正在完成局部修改与自然融合…', preserving: '正在还原框外原图并保存结果…' };
+// 与服务端 ERASE_DEFAULT_INSTRUCTION 保持一致：消除入口预填这条指令。
+const ERASE_INSTRUCTION = '移除涂选区域内的物体，并自然补全背景，与周围环境无缝衔接';
 
 const operationLabels: Record<string, string> = { auto: '自动识别', upload: '上传原图', text_to_image: '文生图', image_to_image: '图生图', edit_prompt: '提示词改图', batch_edit: '批量处理', batch_generate: '批量文生图', edit_text: '文字编辑', local_edit: '局部修改', outpaint: '扩图', enhance: '变清晰', remove_watermark: '去水印', extract_asset: '提取素材' };
 const formatTime = (value: string) => new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit' }).format(new Date(value));
@@ -363,6 +365,15 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   const [localReferenceLoading, setLocalReferenceLoading] = useState(false);
   const localReferenceRevision = useRef(0);
   const localReferenceFileRef = useRef<HTMLInputElement>(null);
+  // 笔刷蒙版：localEditTool 决定用拖拽框选还是画笔涂抹圈出修改区域。
+  const [localEditTool, setLocalEditTool] = useState<'box' | 'brush'>('box');
+  const [brushMode, setBrushMode] = useState<'brush' | 'eraser'>('brush');
+  const [brushSize, setBrushSize] = useState(36);
+  const [brushFeather, setBrushFeather] = useState(2);
+  const [maskPainted, setMaskPainted] = useState(false);
+  const maskCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const maskPainting = useRef(false);
+  const maskLastPoint = useRef<{ x: number; y: number } | null>(null);
   const [outpaintMode, setOutpaintMode] = useState(false);
   const [outpaintSize, setOutpaintSize] = useState('');
   const [outpaintSubmitting, setOutpaintSubmitting] = useState(false);
@@ -461,6 +472,18 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
     return parent.outputs.find((item) => item.id === parent.selectedImageId) || parent.outputs[0] || null;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [bundle, currentVersion?.parentVersionId]);
+
+  // 笔刷蒙版画布分辨率：长边固定 1024 并保持原图比例，涂抹笔迹在该分辨率下绘制，
+  // 提交时导出为 PNG data URL 交给服务端按 alpha 包围盒推导编辑区域。
+  const maskCanvasSize = useMemo(() => {
+    const width = currentImage?.width || 0;
+    const height = currentImage?.height || 0;
+    if (!width || !height) return { width: 0, height: 0 };
+    const scale = 1024 / Math.max(width, height);
+    return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+  }, [currentImage?.width, currentImage?.height]);
+  const maskEditActive = localEditMode && localEditTool === 'brush' && maskPainted;
+  const localSelectionReady = Boolean(localEditRect) || maskEditActive;
 
   const stopPolling = useCallback(() => {
     if (pollTimer.current !== null) {
@@ -679,6 +702,9 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
     setLocalReference(null);
     setLocalReferenceLoading(false);
     closeExtract();
+    setMaskPainted(false);
+    maskPainting.current = false;
+    maskLastPoint.current = null;
     setCanvasImgStatus('loading');
   }, [currentImageId]);
 
@@ -789,6 +815,8 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
 
   function onCanvasSelectionStart(event: React.PointerEvent<HTMLDivElement>) {
     if ((!localEditMode && !extractMode) || event.button !== 0 || generating || localEditSubmitting) return;
+    // 笔刷涂抹模式下指针事件由蒙版画布接管，不进入拖拽框选。
+    if (localEditMode && localEditTool === 'brush') return;
     const target = event.target as Element;
     if (target.closest('.local-edit-panel, .local-edit-dock, .local-batch-panel, .extract-panel')) return;
     const point = canvasPointerRatio(event);
@@ -866,6 +894,9 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
     setLocalEditInstruction('');
     setLocalReference(null);
     setLocalBatchOpen(false);
+    setLocalEditTool('box');
+    setBrushMode('brush');
+    setMaskPainted(false);
   }
 
   function closeLocalEdit() {
@@ -878,6 +909,100 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
     setLocalEditInstruction('');
     setLocalDragging(false);
     setLocalBatchOpen(false);
+    setMaskPainted(false);
+    maskPainting.current = false;
+    maskLastPoint.current = null;
+  }
+
+  function switchLocalTool(tool: 'box' | 'brush') {
+    if (localEditTool === tool || localEditSubmitting || localBatchSubmitting) return;
+    setLocalEditTool(tool);
+    // 两种圈选方式互斥：切到涂抹清掉拖拽框，切回框选则丢弃蒙版笔迹。
+    if (tool === 'brush') setLocalEditRect(null);
+    else setMaskPainted(false);
+  }
+
+  // 「消除」快捷入口：直接进入涂抹模式并预填移除指令，涂抹后一键提交。
+  function startEraseEdit() {
+    if (!currentImage || generating) return;
+    startLocalEdit();
+    setLocalEditTool('brush');
+    setLocalEditInstruction(ERASE_INSTRUCTION);
+  }
+
+  function maskPoint(event: React.PointerEvent<HTMLCanvasElement>) {
+    const canvas = event.currentTarget;
+    const bounds = canvas.getBoundingClientRect();
+    return {
+      x: Math.min(canvas.width, Math.max(0, ((event.clientX - bounds.left) / Math.max(1, bounds.width)) * canvas.width)),
+      y: Math.min(canvas.height, Math.max(0, ((event.clientY - bounds.top) / Math.max(1, bounds.height)) * canvas.height)),
+    };
+  }
+
+  function strokeMask(from: { x: number; y: number }, to: { x: number; y: number }) {
+    const canvas = maskCanvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (!canvas || !ctx) return;
+    // 画笔羽化用 filter blur 柔化笔画边缘；橡皮只做擦除，无需再羽化。
+    ctx.globalCompositeOperation = brushMode === 'eraser' ? 'destination-out' : 'source-over';
+    ctx.filter = brushMode === 'eraser' ? 'none' : `blur(${brushFeather}px)`;
+    ctx.strokeStyle = '#fff';
+    ctx.fillStyle = '#fff';
+    ctx.lineWidth = brushSize;
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    if (Math.abs(from.x - to.x) < 0.5 && Math.abs(from.y - to.y) < 0.5) {
+      // 单击落点：以画笔半径画圆点，保证点一下也有笔迹。
+      ctx.beginPath();
+      ctx.arc(to.x, to.y, brushSize / 2, 0, Math.PI * 2);
+      ctx.fill();
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(from.x, from.y);
+      ctx.lineTo(to.x, to.y);
+      ctx.stroke();
+    }
+    ctx.filter = 'none';
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  function onMaskPointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (event.button !== 0 || localEditSubmitting || localBatchSubmitting || generating) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    maskPainting.current = true;
+    const point = maskPoint(event);
+    maskLastPoint.current = point;
+    strokeMask(point, point);
+    setMaskPainted(true);
+  }
+
+  function onMaskPointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (!maskPainting.current) return;
+    event.stopPropagation();
+    const point = maskPoint(event);
+    strokeMask(maskLastPoint.current || point, point);
+    maskLastPoint.current = point;
+  }
+
+  function onMaskPointerEnd(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (!maskPainting.current) return;
+    event.stopPropagation();
+    maskPainting.current = false;
+    maskLastPoint.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function clearMaskPaint() {
+    const canvas = maskCanvasRef.current;
+    const ctx = canvas?.getContext('2d');
+    if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
+    setMaskPainted(false);
+  }
+
+  function exportMask(): string {
+    return maskCanvasRef.current!.toDataURL('image/png');
   }
 
   async function selectLocalReference(file?: File) {
@@ -903,7 +1028,8 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
   }
 
   async function submitLocalEdit() {
-    if (!currentImage || !localEditRect || (!localEditInstruction.trim() && !localReference) || localReferenceLoading || localEditSubmitting || generating) return;
+    const useMask = maskEditActive;
+    if (!currentImage || (useMask ? false : !localEditRect) || (!localEditInstruction.trim() && !localReference && !useMask) || localReferenceLoading || localEditSubmitting || generating) return;
     setLocalEditSubmitting(true);
     setActiveTask({ id: null, kind: 'local-edit', stage: 'planning' });
     try {
@@ -914,7 +1040,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
         parentVersionId: currentVersion?.id || null,
         instruction: localEditInstruction.trim(),
         reference: localReference || undefined,
-        rect: localEditRect,
+        ...(useMask ? { mask: exportMask() } : { rect: localEditRect! }),
         params: { size: closestSizeForDimensions(provider, currentImage.width, currentImage.height), count, quality: selectedModel?.defaultParams.quality || 'auto', outputFormat: localReference ? 'png' : outputFormat, transparent: localReference ? false : transparentBg },
       });
       setLocalEditMode(false);
@@ -925,7 +1051,8 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
 
   // 批量局部修改：同一选区多组指令，复用批量任务的增量发布与进度轮询。
   async function submitLocalBatch() {
-    if (!currentImage || !localEditRect || localBatchError || localBatchSubmitting || generating) return;
+    const useMask = maskEditActive;
+    if (!currentImage || (useMask ? false : !localEditRect) || localBatchError || localBatchSubmitting || generating) return;
     setLocalBatchSubmitting(true);
     try {
       const result = await api.localEditBatch(projectId, {
@@ -933,7 +1060,7 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
         modelId,
         visionModelId,
         parentVersionId: currentVersion?.id || null,
-        rect: localEditRect,
+        ...(useMask ? { mask: exportMask() } : { rect: localEditRect! }),
         instructions: localBatchLines,
         reference: localReference || undefined,
         params: { size: closestSizeForDimensions(provider, currentImage.width, currentImage.height), quality: selectedModel?.defaultParams.quality || 'auto', outputFormat: localReference ? 'png' : outputFormat, transparent: localReference ? false : transparentBg },
@@ -1407,31 +1534,47 @@ export function WorkspaceView({ projectId, models, activeModel, activeVisionMode
         <section className="canvas-panel">
           <div className="canvas-toolbar">
               <div className="canvas-context">{currentVersion ? <><strong>V{currentVersion.number}</strong><span>{operationLabels[currentVersion.operation]}</span></> : <span>项目画布</span>}</div>
-            <div className="canvas-actions"><button disabled={!currentImage} onClick={() => changeZoom(-0.25)} aria-label="缩小"><Icon name="minus" size={14} /></button><button className="zoom-label" disabled={!currentImage} onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button><button disabled={!currentImage} onClick={() => changeZoom(0.25)} aria-label="放大"><Icon name="plus" size={14} /></button><button className="upload-image-launch" disabled={uploading} title="向当前项目添加一张图片，并将它作为下一次编辑的输入" onClick={() => fileRef.current?.click()}>{uploading ? '上传中…' : <><Icon name="plus" size={14} /> 上传图片</>}</button><button className={`local-edit-launch ${localEditMode ? 'active' : ''}`} disabled={!currentImage || generating || removingWatermark || enhancing} title={localEditMode || localEditRect ? '退出局部修改' : '框选图片区域，用文字要求修改，或上传参考图替换选中的主体'} onClick={localEditMode || localEditRect ? closeLocalEdit : startLocalEdit}>{localEditMode || localEditRect ? <><Icon name="close" size={14} /> 退出局部</> : <><Icon name="box" size={14} /> 局部修改</>}</button><button className={`extract-launch ${(extractMode || extractRect) ? 'active' : ''}`} disabled={!currentImage || generating || removingWatermark || enhancing} title={(extractMode || extractRect) ? '退出提取素材' : '框选图片中的主体，提取为一张独立素材图'} onClick={(extractMode || extractRect) ? closeExtract : startExtract}>{(extractMode || extractRect) ? <><Icon name="close" size={14} /> 退出提取</> : <><Icon name="extract" size={14} /> 提取素材</>}</button><button className={`outpaint-launch ${outpaintMode ? 'active' : ''}`} disabled={!currentImage || generating || removingWatermark || enhancing} title={outpaintMode ? '退出扩图' : '扩展当前图片画布'} onClick={outpaintMode ? closeOutpaint : startOutpaint}>{outpaintMode ? <><Icon name="close" size={14} /> 退出扩图</> : <><Icon name="image" size={14} /> 扩图</>}</button><button className="enhance-launch" disabled={!currentImage || generating || removingWatermark || enhancing} title="调用改图模型提升当前图片的清晰度与细节" onClick={() => void enhanceImage()}>{enhancing ? '处理中…' : <><Icon name="sparkle" size={14} /> 变清晰</>}</button><button className="watermark-remove-launch" disabled={!currentImage || generating || removingWatermark || enhancing} title="先识别覆盖式水印，再调用改图模型修复" onClick={() => void removeWatermark()}>{removingWatermark ? '识别中…' : <><Icon name="sparkle" size={14} /> 去水印</>}</button><button disabled={!currentImage || generating || removingWatermark || enhancing} onClick={() => void openTextEditor()}>编辑文字</button><button disabled={!currentImage} onClick={openCompare}>对比</button><a className={!currentImage ? 'disabled' : ''} href={currentImage?.url} download>下载</a>{currentVersion && currentVersion.outputs.length > 1 && <button className="download-version-zip" title={`将本轮 ${currentVersion.outputs.length} 张候选图下载为 ZIP`} onClick={() => api.downloadVersionImages(projectId, currentVersion.id)}><Icon name="download" size={13} /> ZIP</button>}</div>
+            <div className="canvas-actions"><button disabled={!currentImage} onClick={() => changeZoom(-0.25)} aria-label="缩小"><Icon name="minus" size={14} /></button><button className="zoom-label" disabled={!currentImage} onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button><button disabled={!currentImage} onClick={() => changeZoom(0.25)} aria-label="放大"><Icon name="plus" size={14} /></button><button className="upload-image-launch" disabled={uploading} title="向当前项目添加一张图片，并将它作为下一次编辑的输入" onClick={() => fileRef.current?.click()}>{uploading ? '上传中…' : <><Icon name="plus" size={14} /> 上传图片</>}</button><button className={`local-edit-launch ${localEditMode ? 'active' : ''}`} disabled={!currentImage || generating || removingWatermark || enhancing} title={localEditMode || localEditRect ? '退出局部修改' : '框选图片区域，用文字要求修改，或上传参考图替换选中的主体'} onClick={localEditMode || localEditRect ? closeLocalEdit : startLocalEdit}>{localEditMode || localEditRect ? <><Icon name="close" size={14} /> 退出局部</> : <><Icon name="box" size={14} /> 局部修改</>}</button><button className={`erase-launch ${localEditMode && localEditTool === 'brush' && localEditInstruction === ERASE_INSTRUCTION ? 'active' : ''}`} disabled={!currentImage || generating || removingWatermark || enhancing} title="涂抹要消除的物体，自动移除并自然补全背景，蒙版外像素保持不变" onClick={startEraseEdit}><Icon name="eraser" size={14} /> 消除</button><button className={`extract-launch ${(extractMode || extractRect) ? 'active' : ''}`} disabled={!currentImage || generating || removingWatermark || enhancing} title={(extractMode || extractRect) ? '退出提取素材' : '框选图片中的主体，提取为一张独立素材图'} onClick={(extractMode || extractRect) ? closeExtract : startExtract}>{(extractMode || extractRect) ? <><Icon name="close" size={14} /> 退出提取</> : <><Icon name="extract" size={14} /> 提取素材</>}</button><button className={`outpaint-launch ${outpaintMode ? 'active' : ''}`} disabled={!currentImage || generating || removingWatermark || enhancing} title={outpaintMode ? '退出扩图' : '扩展当前图片画布'} onClick={outpaintMode ? closeOutpaint : startOutpaint}>{outpaintMode ? <><Icon name="close" size={14} /> 退出扩图</> : <><Icon name="image" size={14} /> 扩图</>}</button><button className="enhance-launch" disabled={!currentImage || generating || removingWatermark || enhancing} title="调用改图模型提升当前图片的清晰度与细节" onClick={() => void enhanceImage()}>{enhancing ? '处理中…' : <><Icon name="sparkle" size={14} /> 变清晰</>}</button><button className="watermark-remove-launch" disabled={!currentImage || generating || removingWatermark || enhancing} title="先识别覆盖式水印，再调用改图模型修复" onClick={() => void removeWatermark()}>{removingWatermark ? '识别中…' : <><Icon name="sparkle" size={14} /> 去水印</>}</button><button disabled={!currentImage || generating || removingWatermark || enhancing} onClick={() => void openTextEditor()}>编辑文字</button><button disabled={!currentImage} onClick={openCompare}>对比</button><a className={!currentImage ? 'disabled' : ''} href={currentImage?.url} download>下载</a>{currentVersion && currentVersion.outputs.length > 1 && <button className="download-version-zip" title={`将本轮 ${currentVersion.outputs.length} 张候选图下载为 ZIP`} onClick={() => api.downloadVersionImages(projectId, currentVersion.id)}><Icon name="download" size={13} /> ZIP</button>}</div>
           </div>
           <div className={`canvas-stage ${(localEditMode || extractMode) ? 'selection-mode' : ''}`} onPointerDown={onCanvasSelectionStart} onPointerMove={onCanvasSelectionMove} onPointerUp={onCanvasSelectionEnd} onPointerCancel={onCanvasSelectionCancel}>
             {currentImage && <button type="button" className="batch-launch" disabled={!batchEditSupported || generating} title={!batchEditSupported ? '当前模型不支持提示词改图' : '在右侧批量面板中，以当前画布图片为基准逐张批量处理'} onPointerDown={(event) => event.stopPropagation()} onClick={openBatchPanel}><Icon name="grid" size={14} /> 批量处理</button>}
-            {currentImage ? <div className={`canvas-image-wrap ${zoom !== 1 ? 'is-zoomed' : ''} ${localEditMode ? 'local-editing' : ''} ${(extractMode || extractRect) ? 'extracting' : ''} ${outpaintMode ? 'outpaint-preview-wrap' : ''} ${canvasImgStatus === 'loading' ? 'is-loading' : ''}`} style={zoom !== 1 ? { width: `${zoom * 100}%` } : undefined} onContextMenu={(event) => openImageContextMenu(event, currentImage.id)}>{outpaintMode ? <div className="outpaint-preview" style={outpaintAspectRatio ? { aspectRatio: outpaintAspectRatio } : undefined}><img src={thumbUrl(currentImage, 1280)} alt={`扩图预览${currentVersion ? `版本 V${currentVersion.number}` : ''}`} fetchPriority="high" decoding="async" onLoad={() => setCanvasImgStatus('done')} /><span>新增画布区域</span></div> : <img src={thumbUrl(currentImage, 1280)} alt={`项目图片${currentVersion ? `版本 V${currentVersion.number}` : ''}`} fetchPriority="high" decoding="async" onLoad={() => setCanvasImgStatus('done')} />}{canvasImgStatus === 'loading' && <div className="canvas-loading-overlay"><span className="spinner" /></div>}{(localEditMode || localEditRect) && <div className="local-edit-surface">{localEditRect && <span className="local-edit-rect" style={{ left: `${localEditRect.x}%`, top: `${localEditRect.y}%`, width: `${localEditRect.width}%`, height: `${localEditRect.height}%` }}><em>修改区域</em></span>}</div>}{(extractMode || extractRect) && <div className="extract-surface">{extractRect && <span className="extract-rect" style={{ left: `${extractRect.x}%`, top: `${extractRect.y}%`, width: `${extractRect.width}%`, height: `${extractRect.height}%` }}><em>提取区域</em></span>}</div>}<span className="image-chip">{outpaintMode ? `目标 ${outpaintSize}` : `${currentImage.width || '—'} × ${currentImage.height || '—'}`}</span></div> : (
+            {currentImage ? <div className={`canvas-image-wrap ${zoom !== 1 ? 'is-zoomed' : ''} ${localEditMode ? 'local-editing' : ''} ${(extractMode || extractRect) ? 'extracting' : ''} ${outpaintMode ? 'outpaint-preview-wrap' : ''} ${canvasImgStatus === 'loading' ? 'is-loading' : ''}`} style={zoom !== 1 ? { width: `${zoom * 100}%` } : undefined} onContextMenu={(event) => openImageContextMenu(event, currentImage.id)}>{outpaintMode ? <div className="outpaint-preview" style={outpaintAspectRatio ? { aspectRatio: outpaintAspectRatio } : undefined}><img src={thumbUrl(currentImage, 1280)} alt={`扩图预览${currentVersion ? `版本 V${currentVersion.number}` : ''}`} fetchPriority="high" decoding="async" onLoad={() => setCanvasImgStatus('done')} /><span>新增画布区域</span></div> : <img src={thumbUrl(currentImage, 1280)} alt={`项目图片${currentVersion ? `版本 V${currentVersion.number}` : ''}`} fetchPriority="high" decoding="async" onLoad={() => setCanvasImgStatus('done')} />}{canvasImgStatus === 'loading' && <div className="canvas-loading-overlay"><span className="spinner" /></div>}{(localEditMode || localEditRect) && <div className="local-edit-surface">{localEditRect && <span className="local-edit-rect" style={{ left: `${localEditRect.x}%`, top: `${localEditRect.y}%`, width: `${localEditRect.width}%`, height: `${localEditRect.height}%` }}><em>修改区域</em></span>}</div>}{localEditMode && localEditTool === 'brush' && maskCanvasSize.width > 0 && <canvas ref={maskCanvasRef} className={`mask-canvas ${brushMode === 'eraser' ? 'erasing' : ''}`} width={maskCanvasSize.width} height={maskCanvasSize.height} aria-label="涂抹蒙版画布" onPointerDown={onMaskPointerDown} onPointerMove={onMaskPointerMove} onPointerUp={onMaskPointerEnd} onPointerCancel={onMaskPointerEnd} />}{(extractMode || extractRect) && <div className="extract-surface">{extractRect && <span className="extract-rect" style={{ left: `${extractRect.x}%`, top: `${extractRect.y}%`, width: `${extractRect.width}%`, height: `${extractRect.height}%` }}><em>提取区域</em></span>}</div>}<span className="image-chip">{outpaintMode ? `目标 ${outpaintSize}` : `${currentImage.width || '—'} × ${currentImage.height || '—'}`}</span></div> : (
               <div className="canvas-empty"><div className="empty-visual"><span /><span /><span /></div><h2>开始你的第一张作品</h2><p>在右侧输入创作描述，或者上传 / 直接 Ctrl+V 粘贴一张图片进行修改。</p><button className="button secondary" onClick={() => fileRef.current?.click()}>上传初始图片</button></div>
             )}
             {localEditMode && !localDragging && currentImage && <div className="local-edit-dock" onPointerDown={(event) => event.stopPropagation()}>
               <section className="local-edit-panel" role="dialog" aria-label="局部修改">
-              <div className="local-edit-panel-head"><div><strong>局部修改</strong><span>{localEditRect ? '描述改动，或上传参考图替换选中的主体' : '可从图片内外起拖，框选需要修改的位置；框选后可填写文字要求或上传参考图'}</span></div><button className="local-edit-exit" disabled={localEditSubmitting} onClick={closeLocalEdit}><Icon name="close" size={13} /> 退出</button></div>
-              {localEditRect && <>
+              <div className="local-edit-panel-head"><div><strong>局部修改</strong><span>{localEditTool === 'brush' ? (maskPainted ? '已涂抹选区，可填写要求，或直接提交' : '用画笔涂抹需要修改的区域，可用橡皮修整') : localEditRect ? '描述改动，或上传参考图替换选中的主体' : '可从图片内外起拖，框选需要修改的位置；框选后可填写文字要求或上传参考图'}</span></div><button className="local-edit-exit" disabled={localEditSubmitting} onClick={closeLocalEdit}><Icon name="close" size={13} /> 退出</button></div>
+              <div className="local-edit-tools" role="tablist" aria-label="圈选方式">
+                <button type="button" role="tab" aria-selected={localEditTool === 'box'} className={localEditTool === 'box' ? 'active' : ''} disabled={localEditSubmitting || localBatchSubmitting} onClick={() => switchLocalTool('box')}><Icon name="box" size={13} /> 拖拽框选</button>
+                <button type="button" role="tab" aria-selected={localEditTool === 'brush'} className={localEditTool === 'brush' ? 'active' : ''} disabled={localEditSubmitting || localBatchSubmitting} onClick={() => switchLocalTool('brush')}><Icon name="edit" size={13} /> 笔刷涂抹</button>
+              </div>
+              {localEditTool === 'brush' && <>
+                <div className="brush-controls">
+                  <div className="brush-mode-toggle" role="group" aria-label="画笔工具">
+                    <button type="button" className={brushMode === 'brush' ? 'active' : ''} disabled={localEditSubmitting || localBatchSubmitting} onClick={() => setBrushMode('brush')}><Icon name="edit" size={12} /> 画笔</button>
+                    <button type="button" className={brushMode === 'eraser' ? 'active' : ''} disabled={localEditSubmitting || localBatchSubmitting} onClick={() => setBrushMode('eraser')}>橡皮</button>
+                  </div>
+                  <label>笔刷<input type="range" min={4} max={160} step={2} value={brushSize} disabled={localEditSubmitting || localBatchSubmitting} onChange={(event) => setBrushSize(Number(event.target.value))} /><span>{brushSize}px</span></label>
+                  <label>羽化<input type="range" min={0} max={8} step={1} value={brushFeather} disabled={localEditSubmitting || localBatchSubmitting} onChange={(event) => setBrushFeather(Number(event.target.value))} /><span>{brushFeather ? `${brushFeather}px` : '关'}</span></label>
+                  <button type="button" className="brush-clear" disabled={!maskPainted || localEditSubmitting || localBatchSubmitting} onClick={clearMaskPaint}>清除涂抹</button>
+                </div>
+                <p className="local-mask-note">只涂抹、不填写要求时，默认移除涂选内容并自然补全背景；涂抹外的像素严格保留原图。</p>
+              </>}
+              {localSelectionReady && <>
                 <input ref={localReferenceFileRef} type="file" accept="image/png,image/jpeg,image/webp" hidden onChange={(event) => { const file = event.target.files?.[0]; event.target.value = ''; void selectLocalReference(file); }} />
                 <div className="local-reference">
                   {localReference && <img src={localReference.data} alt="局部替换参考图" />}
-                  <div><strong>{localReference ? localReference.name || '已选择参考图' : '参考图片（可选）'}</strong><span>{localReference ? '将识别参考图中的主体并融合到框选位置' : '例如：框选人头，上传狗的照片，自动完成换头'}</span>
+                  <div><strong>{localReference ? localReference.name || '已选择参考图' : '参考图片（可选）'}</strong><span>{localReference ? `将识别参考图中的主体并融合到${localEditTool === 'brush' ? '涂抹' : '框选'}位置` : '例如：框选人头，上传狗的照片，自动完成换头'}</span>
                     <div className="local-reference-actions"><button className="button secondary" disabled={localReferenceLoading || localEditSubmitting || generating} onClick={() => localReferenceFileRef.current?.click()}>{localReferenceLoading ? '正在读取…' : localReference ? '更换图片' : '上传参考图'}</button>{localReference && <button className="button secondary" disabled={localReferenceLoading || localEditSubmitting || generating} onClick={() => { localReferenceRevision.current++; setLocalReference(null); }}>移除</button>}</div>
                     <small>PNG / JPEG / WebP，最大 10MB，也可 Ctrl+V 粘贴</small>
                   </div>
                 </div>
-                <textarea aria-label="局部修改要求" disabled={localEditSubmitting} value={localEditInstruction} onChange={(event) => setLocalEditInstruction(event.target.value)} placeholder={localReference ? '可不填写，由模型推断意图。也可补充：只替换头部，保留耳朵，保持原图的姿态与光影' : '例如：将桌上的咖啡杯替换成透明玻璃花瓶，保留光影和画面风格'} rows={2} />
+                <textarea aria-label="局部修改要求" disabled={localEditSubmitting} value={localEditInstruction} onChange={(event) => setLocalEditInstruction(event.target.value)} placeholder={localReference ? '可不填写，由模型推断意图。也可补充：只替换头部，保留耳朵，保持原图的姿态与光影' : localEditTool === 'brush' ? '可选。例如：把涂选的水印去掉，保留背景纹理；留空则默认移除涂选内容' : '例如：将桌上的咖啡杯替换成透明玻璃花瓶，保留光影和画面风格'} rows={2} />
                 {localReference && <p className="local-reference-note">智能定位 → 裁剪合成 → 自然融合。请为衔接处留出选区空间；框外保留原图，结果按原图尺寸保存为 PNG。</p>}
-                <div className="local-edit-panel-actions"><button className="button secondary" disabled={localEditSubmitting || localBatchSubmitting || generating} onClick={() => setLocalEditRect(null)}>重新框选</button><button className="button secondary" disabled={localEditSubmitting || localBatchSubmitting || generating} onClick={() => setLocalBatchOpen((open) => !open)}>批量修改</button><button className="button primary" disabled={(!localEditInstruction.trim() && !localReference) || localReferenceLoading || localEditSubmitting || localBatchSubmitting || generating} onClick={() => void submitLocalEdit()}>{localEditSubmitting ? '正在提交…' : localReference ? '智能替换并融合' : '应用局部修改'}</button></div>
+                <div className="local-edit-panel-actions">{localEditTool === 'brush' ? <button className="button secondary" disabled={localEditSubmitting || localBatchSubmitting || generating} onClick={clearMaskPaint}>重新涂抹</button> : <button className="button secondary" disabled={localEditSubmitting || localBatchSubmitting || generating} onClick={() => setLocalEditRect(null)}>重新框选</button>}<button className="button secondary" disabled={localEditSubmitting || localBatchSubmitting || generating} onClick={() => setLocalBatchOpen((open) => !open)}>批量修改</button><button className="button primary" disabled={(!localEditInstruction.trim() && !localReference && !maskEditActive) || localReferenceLoading || localEditSubmitting || localBatchSubmitting || generating} onClick={() => void submitLocalEdit()}>{localEditSubmitting ? '正在提交…' : localReference ? '智能替换并融合' : maskEditActive && !localEditInstruction.trim() ? '涂抹消除' : '应用局部修改'}</button></div>
               </>}
             </section>
-              {localEditRect && localBatchOpen && <aside className="local-batch-panel" role="dialog" aria-label="批量局部修改">
+              {localSelectionReady && localBatchOpen && <aside className="local-batch-panel" role="dialog" aria-label="批量局部修改">
                 <div className="local-edit-panel-head"><div><strong>批量局部修改</strong><span>同一选区逐张尝试多组指令，结果进入同一版本</span></div><button className="local-edit-exit" disabled={localBatchSubmitting} onClick={() => setLocalBatchOpen(false)}><Icon name="close" size={13} /> 收起</button></div>
                 <textarea aria-label="批量修改指令列表" value={localBatchText} onChange={(event) => setLocalBatchText(event.target.value)} rows={7} spellCheck={false} placeholder={'每行一条修改指令，空行自动忽略。\n例如：\n把帽子换成红色贝雷帽\n把帽子换成蓝色棒球帽'} />
                 <small className={localBatchLines.length >= 2 && !localBatchError ? 'local-batch-count valid' : 'local-batch-count'}>{localBatchLines.length ? `已识别 ${localBatchLines.length} 条指令，将生成 ${localBatchLines.length} 张；2–50 条，单条不超过 1000 字符。` : '每行一条指令，空行自动忽略；2–50 条，单条不超过 1000 字符。'}</small>

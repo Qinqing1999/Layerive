@@ -10,7 +10,7 @@ import { makeDemoPng, makeThumbnailPng, readImageDimensions } from './png.mjs';
 import { isSenseNovaLegacyVisionEndpoint, isSenseNovaTokenChatEndpoint, normalizeBaseUrl, pickApiKey, publicModel, readModels, removeModel, upsertModel, visionApiFormat, visionEndpoint, writeModels } from './models.mjs';
 import { adjustUserQuota, checkAndResetDailyQuota, consumeQuota, createUser, deleteUser, getRemainingQuota, getUserProfile, hasDefaultAdminCredentials, isVip, listUsersPublic, readUsers, setUserVip, updateUser, verifyLogin, watchAd, writeUsers } from './users.mjs';
 import { createZip, readZip } from './zip.mjs';
-import { composeLocalReference, normalizeLocalImage, normalizeSenseNovaInput, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
+import { composeLocalReference, maskBytes, maskRegion, normalizeLocalImage, normalizeSenseNovaInput, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
 
 const PORT = Number(process.env.PIXELFLOW_API_PORT || 8788);
 // Loopback by default. PIXELFLOW_API_HOST=0.0.0.0 opts in to LAN access for the
@@ -1074,18 +1074,55 @@ async function editImageText(projectId, input) {
   );
 }
 
+// 消除模式默认指令：用户只涂了蒙版、没写要求时按“移除并补全背景”处理。
+const ERASE_DEFAULT_INSTRUCTION = '移除涂选区域内的物体，并自然补全背景，与周围环境无缝衔接';
+
+// 笔刷蒙版入口：把涂选 alpha 包围盒（外扩 1.5% 作上下文）换算成规划 rect，
+// 后续视觉规划、提示词约束与回填都复用 rect 流水线。
+async function maskEditContext(image, mask) {
+  const width = image.width;
+  const height = image.height;
+  if (!width || !height) throw Object.assign(new Error('当前图片缺少尺寸信息，无法使用涂抹蒙版'), { status: 400 });
+  const bytes = maskBytes(mask);
+  const region = await maskRegion(bytes, width, height);
+  const padX = width * 0.015;
+  const padY = height * 0.015;
+  const left = Math.max(0, region.left - padX);
+  const top = Math.max(0, region.top - padY);
+  const right = Math.min(width, region.left + region.width + padX);
+  const bottom = Math.min(height, region.top + region.height + padY);
+  return {
+    rect: validateRect({
+      x: left * 100 / width,
+      y: top * 100 / height,
+      width: (right - left) * 100 / width,
+      height: (bottom - top) * 100 / height,
+    }),
+    mask: { bytes, ...region },
+  };
+}
+
 async function editImageRegion(projectId, input) {
   projectOrThrow(projectId);
-  const instruction = String(input.instruction || '').trim();
+  let instruction = String(input.instruction || '').trim();
   const reference = input.reference == null ? null : referenceBytes(input.reference);
-  if (!instruction && !reference) throw Object.assign(new Error('请描述修改要求或上传参考图'), { status: 400 });
-  const rect = validateRect(input.rect);
-  if (rect.width < 1 || rect.height < 1) throw Object.assign(new Error('框选区域太小，请重新框选'), { status: 400 });
   const config = readModels();
   const visionModel = visionModelOrThrow(config, input.visionModelId);
-  const image = imageOrThrow(projectId, input.imageId);
   if (!visionModel.apiKey) throw Object.assign(new Error('请先配置视觉识别模型的 API Key'), { status: 400 });
-  return startGeneration(projectId, { prompt: instruction || '根据参考图智能替换框选主体并自然融合', operation: 'local_edit', modelId: input.modelId, inputImageId: image.id, parentVersionId: image.version_id || null, params: reference ? { ...(input.params || {}), outputFormat: 'png', transparent: false } : input.params || {} }, { rect, instruction, reference, visionModel });
+  const image = imageOrThrow(projectId, input.imageId);
+  let rect;
+  let mask = null;
+  if (input.mask != null) {
+    const context = await maskEditContext(image, input.mask);
+    rect = context.rect;
+    mask = context.mask;
+    if (!instruction && !reference) instruction = ERASE_DEFAULT_INSTRUCTION;
+  } else {
+    rect = validateRect(input.rect);
+    if (rect.width < 1 || rect.height < 1) throw Object.assign(new Error('框选区域太小，请重新框选'), { status: 400 });
+  }
+  if (!instruction && !reference) throw Object.assign(new Error('请描述修改要求或上传参考图'), { status: 400 });
+  return startGeneration(projectId, { prompt: instruction || '根据参考图智能替换框选主体并自然融合', operation: 'local_edit', modelId: input.modelId, inputImageId: image.id, parentVersionId: image.version_id || null, params: reference ? { ...(input.params || {}), outputFormat: 'png', transparent: false } : input.params || {} }, { rect, instruction, reference, visionModel, mask });
 }
 
 function updateTaskInput(taskId, patch) {
@@ -1106,13 +1143,23 @@ async function saveLocalEditMaterial(projectId, taskId, image, sourceType) {
 }
 
 async function prepareLocalEdit(projectId, taskId, sourceImage, localEdit, signal) {
-  const { rect, instruction, reference, visionModel } = localEdit;
+  const { rect, instruction, reference, visionModel, mask } = localEdit;
   const region = `原图左上角为原点，x=${rect.x}%、y=${rect.y}%、宽=${rect.width}%、高=${rect.height}%`;
   updateTaskInput(taskId, { stage: 'planning' });
   signal.throwIfAborted();
+  if (mask) await saveLocalEditMaterial(projectId, taskId, { buffer: mask.bytes, width: mask.maskWidth, height: mask.maskHeight }, 'local_mask');
   if (!reference) {
     const planned = parseVisionJson(await callVision(visionModel, sourceImage, `你是图片局部修改规划助手。只允许修改框选区域，框外的所有文字、人物、背景、构图、光影、颜色、风格、尺寸和物体必须保持不变。请结合图片内容和要求生成准确中文提示词，保留精确区域坐标。返回严格 JSON：{"edit_prompt":"..."}。\n框选区域：${region}\n用户要求：${instruction}`, signal));
-    return { image: sourceImage, prompt: `${String(planned.edit_prompt || instruction)}\n精确约束：仅修改${region}，框外内容不得改动。` };
+    if (!mask) return { image: sourceImage, prompt: `${String(planned.edit_prompt || instruction)}\n精确约束：仅修改${region}，框外内容不得改动。` };
+    // 蒙版路径同步返回解码后的原图：生成结束后按蒙版 alpha 逐像素羽化回填，
+    // 蒙版外像素严格保留原图，而不是依赖模型自觉保持框外内容。
+    const source = await normalizeLocalImage(await readFile(path.join(PROJECTS_ROOT, projectId, sourceImage.file_path)));
+    return {
+      image: sourceImage,
+      prompt: `${String(planned.edit_prompt || instruction)}\n精确约束：仅修改${region}；最终仅采用用户涂选蒙版覆盖的生成结果，蒙版外像素会严格还原为原图。框外内容不得改动。`,
+      source,
+      mask,
+    };
   }
   const source = await normalizeLocalImage(await readFile(path.join(PROJECTS_ROOT, projectId, sourceImage.file_path)));
   const normalizedReference = await normalizeLocalImage(reference, true);
@@ -1408,7 +1455,7 @@ function startGeneration(projectId, input, localEdit = null, textEdit = null) {
   db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)').run(userMessageId, projectId, 'user', 'prompt', JSON.stringify({ prompt, operation, inputImageId: inputImage?.id || null, params, modelName: model.name, promptMode: autoPromptMode ? 'auto' : undefined }), createdAt);
   const taskInput = {
     inputImageId: inputImage?.id || null,
-    ...(localEdit ? { stage: 'planning', localEdit: { rect: localEdit.rect, hasReference: Boolean(localEdit.reference), visionModelId: localEdit.visionModel.id } } : {}),
+    ...(localEdit ? { stage: 'planning', localEdit: { rect: localEdit.rect, hasReference: Boolean(localEdit.reference), hasMask: Boolean(localEdit.mask), visionModelId: localEdit.visionModel.id } } : {}),
     ...(!localEdit && autoPromptMode ? { stage: 'planning', promptMode: 'auto', visionModelId: promptVisionModel.id } : {}),
     ...(textEdit ? { textEdit } : {}),
   };
@@ -1490,8 +1537,9 @@ async function runGenerationTask(projectId, taskId, context) {
     if (localSource) {
       updateTaskInput(taskId, { stage: 'preserving' });
       const preserved = [];
+      const blendMask = context.localEdit.reference ? null : context.localEdit.mask;
       for (const output of generated) {
-        preserved.push({ ...await preserveOutsideRegion(localSource, output, context.localEdit.rect), promptIndex: output.promptIndex });
+        preserved.push({ ...await preserveOutsideRegion(localSource, output, context.localEdit.rect, blendMask), promptIndex: output.promptIndex });
         controller.signal.throwIfAborted();
       }
       generated = preserved;
@@ -1528,7 +1576,7 @@ async function runGenerationTask(projectId, taskId, context) {
         .run(versionId, projectId, taskId, parentVersionId, versionNumber, operation, outputIds[0], status, finishedAt);
       if (inputImage) db.prepare('INSERT OR IGNORE INTO version_inputs VALUES (?, ?, ?)').run(versionId, inputImage.id, 'source');
       if (context.localEdit) {
-        for (const material of db.prepare("SELECT id, source_type FROM images WHERE task_id = ? AND source_type IN ('local_reference', 'local_composite')").all(taskId)) {
+        for (const material of db.prepare("SELECT id, source_type FROM images WHERE task_id = ? AND source_type IN ('local_reference', 'local_composite', 'local_mask')").all(taskId)) {
           db.prepare('INSERT OR IGNORE INTO version_inputs VALUES (?, ?, ?)').run(versionId, material.id, material.source_type);
         }
       }
@@ -2039,16 +2087,25 @@ async function runBatchGenerateTask(projectId, taskId, context) {
 // 复用批量任务的增量发布框架，但每个子项走局部修改流水线：
 // 视觉规划 →（有参考图时）合成 → 生成 → 框外像素保留，全部输出进入同一版本。
 
-function startLocalEditBatch(projectId, input) {
+async function startLocalEditBatch(projectId, input) {
   if (restoreInProgress) throw restoringError();
   projectOrThrow(projectId);
   ensureProjectDirs(projectId);
   const config = readModels();
   const visionModel = visionModelOrThrow(config, input.visionModelId);
   if (!visionModel.apiKey) throw Object.assign(new Error('请先配置视觉识别模型的 API Key'), { status: 400 });
-  const rect = validateRect(input.rect);
-  if (rect.width < 1 || rect.height < 1) throw Object.assign(new Error('框选区域太小，请重新框选'), { status: 400 });
+  const source = ensureUploadVersion(projectId, imageOrThrow(projectId, input.imageId));
   const reference = input.reference == null ? null : referenceBytes(input.reference);
+  let rect;
+  let mask = null;
+  if (input.mask != null) {
+    const context = await maskEditContext(source, input.mask);
+    rect = context.rect;
+    mask = context.mask;
+  } else {
+    rect = validateRect(input.rect);
+    if (rect.width < 1 || rect.height < 1) throw Object.assign(new Error('框选区域太小，请重新框选'), { status: 400 });
+  }
   const instructions = (Array.isArray(input.instructions) ? input.instructions : []).map((value) => String(value ?? '').trim()).filter(Boolean);
   if (instructions.length < 2 || instructions.length > BATCH_EDIT_MAX_ITEMS) {
     throw Object.assign(new Error(`批量局部修改需 2–${BATCH_EDIT_MAX_ITEMS} 条指令`), { status: 400 });
@@ -2059,7 +2116,6 @@ function startLocalEditBatch(projectId, input) {
   const model = config.models.find((item) => item.id === (requestedModelId || config.active_model));
   if (!model || model.type === 'vision') throw Object.assign(new Error('请选择有效的图片生成模型'), { status: 400 });
   if (!model.capabilities.includes('edit_prompt')) throw Object.assign(new Error('当前模型不支持提示词改图'), { status: 400 });
-  const source = ensureUploadVersion(projectId, imageOrThrow(projectId, input.imageId));
   const params = { ...model.defaultParams, ...(input.params || {}), count: 1 };
   if (reference) { params.outputFormat = 'png'; params.transparent = false; }
   const taskId = uid();
@@ -2069,7 +2125,7 @@ function startLocalEditBatch(projectId, input) {
   const versionNumber = Number(db.prepare('SELECT COALESCE(MAX(version_number), 0) + 1 AS next FROM image_versions WHERE project_id = ?').get(projectId).next);
   const promptSummary = `批量局部修改：共 ${instructions.length} 条指令，逐张处理同一选区。`;
   const items = instructions.map((instruction, index) => ({ index, values: { 指令: instruction }, status: 'pending' }));
-  const taskInput = { inputImageId: source.id, versionId, versionNumber, localEdit: { rect, hasReference: Boolean(reference), visionModelId: visionModel.id }, batch: { prompts: instructions, local: true, total: instructions.length, currentIndex: null, items } };
+  const taskInput = { inputImageId: source.id, versionId, versionNumber, localEdit: { rect, hasReference: Boolean(reference), hasMask: Boolean(mask), visionModelId: visionModel.id }, batch: { prompts: instructions, local: true, total: instructions.length, currentIndex: null, items } };
   db.exec('BEGIN');
   try {
     db.prepare('INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?)').run(userMessageId, projectId, 'user', 'prompt', JSON.stringify({ prompt: promptSummary, operation: 'local_edit', inputImageId: source.id, params: { ...params, quantity: instructions.length }, modelName: model.name, batch: { local: true, prompts: instructions } }), createdAt);
@@ -2087,18 +2143,18 @@ function startLocalEditBatch(projectId, input) {
     const controller = new AbortController();
     const timeoutMs = Math.min(3 * 60 * 60 * 1000, 120000 + instructions.length * 240000);
     const timer = setTimeout(() => controller.abort(new Error('timeout')), timeoutMs);
-    trackTask(taskId, controller, timer, () => runLocalEditBatchTask(projectId, taskId, { model, source, params, versionId, versionNumber, rect, reference, visionModel, instructions, promptSummary, controller }));
+    trackTask(taskId, controller, timer, () => runLocalEditBatchTask(projectId, taskId, { model, source, params, versionId, versionNumber, rect, reference, mask, visionModel, instructions, promptSummary, controller }));
   });
   return { taskId, versionId, status: 'queued', userMessageId };
 }
 
 async function runLocalEditBatchTask(projectId, taskId, context) {
-  const { model, source, params, versionId, versionNumber, rect, reference, visionModel, instructions, promptSummary, controller } = context;
+  const { model, source, params, versionId, versionNumber, rect, reference, mask, visionModel, instructions, promptSummary, controller } = context;
   const items = instructions.map((instruction, index) => ({ index, values: { 指令: instruction }, status: 'pending' }));
   const successful = [];
   const taskInput = () => {
     const activeIndex = items.findIndex((item) => item.status === 'generating');
-    return { inputImageId: source.id, versionId, versionNumber, localEdit: { rect, hasReference: Boolean(reference), visionModelId: visionModel.id }, batch: { prompts: instructions, local: true, total: instructions.length, currentIndex: activeIndex >= 0 ? activeIndex : null, items } };
+    return { inputImageId: source.id, versionId, versionNumber, localEdit: { rect, hasReference: Boolean(reference), hasMask: Boolean(mask), visionModelId: visionModel.id }, batch: { prompts: instructions, local: true, total: instructions.length, currentIndex: activeIndex >= 0 ? activeIndex : null, items } };
   };
   try {
     if (!model.apiKey && model.provider !== 'mock') throw new Error('模型尚未配置 API Key');
@@ -2110,7 +2166,7 @@ async function runLocalEditBatchTask(projectId, taskId, context) {
       item.startedAt = new Date(startedAt).toISOString();
       db.prepare('UPDATE generation_tasks SET input_json = ? WHERE id = ?').run(JSON.stringify(taskInput()), taskId);
       try {
-        const prepared = await prepareLocalEdit(projectId, taskId, source, { rect, instruction: instructions[index], reference, visionModel }, controller.signal);
+        const prepared = await prepareLocalEdit(projectId, taskId, source, { rect, instruction: instructions[index], reference, visionModel, mask }, controller.signal);
         let output;
         if (model.provider === 'mock') {
           const { width, height } = parseSize(params.size);
@@ -2125,7 +2181,7 @@ async function runLocalEditBatchTask(projectId, taskId, context) {
         controller.signal.throwIfAborted();
         if (prepared.source) {
           updateTaskInput(taskId, { stage: 'preserving' });
-          output = await preserveOutsideRegion(prepared.source, output, rect);
+          output = await preserveOutsideRegion(prepared.source, output, rect, reference ? null : mask);
           controller.signal.throwIfAborted();
         }
         const dimensions = readImageDimensions(output.bytes, output.mimeType) || parseSize(params.size);
@@ -3085,7 +3141,7 @@ const server = http.createServer(async (req, res) => {
     const batchEditProgressMatch = pathname.match(/^\/api\/projects\/([^/]+)\/batch-edits\/([^/]+)$/);
     if (batchEditProgressMatch && req.method === 'GET') return json(res, 200, batchEditProgress(batchEditProgressMatch[1], batchEditProgressMatch[2]));
     const localEditBatchMatch = pathname.match(/^\/api\/projects\/([^/]+)\/local-edit-batch$/);
-    if (localEditBatchMatch && req.method === 'POST') return json(res, 202, startLocalEditBatch(localEditBatchMatch[1], await body(req)));
+    if (localEditBatchMatch && req.method === 'POST') return json(res, 202, await startLocalEditBatch(localEditBatchMatch[1], await body(req)));
 
     const tasksMatch = pathname.match(/^\/api\/projects\/([^/]+)\/tasks$/);
     if (tasksMatch && req.method === 'GET') {
@@ -3209,7 +3265,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-  console.log(`Layerive API running at http://${HOST}:${server.address().port}`);
+  // 0.0.0.0 / :: 只是监听通配；日志展示回环地址，客户端与测试脚本都按它连接。
+  const displayHost = HOST === '0.0.0.0' || HOST === '::' ? '127.0.0.1' : HOST;
+  console.log(`Layerive API running at http://${displayHost}:${server.address().port}`);
   if (PUBLIC_MODE) {
     console.log('已启用公网访问模式（PIXELFLOW_PUBLIC=1）：任意域名可访问，鉴权由会话令牌/Cookie 与登录限速保障。');
     if (hasDefaultAdminCredentials()) {

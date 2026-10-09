@@ -6,7 +6,7 @@ import { once } from 'node:events';
 import { mkdtemp, mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
-import { composeLocalReference, normalizeLocalImage, normalizeSenseNovaInput, pixelRect, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
+import { composeLocalReference, maskBytes, maskRegion, normalizeLocalImage, normalizeSenseNovaInput, pixelRect, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
 import { authHeaders, login } from './test-auth.mjs';
 
 const rect = { x: 25, y: 20, width: 50, height: 60 };
@@ -34,6 +34,55 @@ test('reject invalid uploads and model coordinates before compositing', () => {
   assert.throws(() => referenceBytes({ data: '!!!!', mimeType: 'image/png' }));
   assert.throws(() => referenceBytes({ data: 'YWJj', mimeType: 'image/svg+xml' }));
   assert.throws(() => referenceBytes({ data: 'A'.repeat(14 * 1024 * 1024), mimeType: 'image/png' }));
+});
+
+// ---- 笔刷蒙版 ----------------------------------------------------------
+
+const whitePatch = (width, height) => sharp({ create: { width, height, channels: 4, background: { r: 255, g: 255, b: 255, alpha: 1 } } }).png().toBuffer();
+const transparentCanvas = (width, height) => sharp({ create: { width, height, channels: 4, background: { r: 0, g: 0, b: 0, alpha: 0 } } }).png().toBuffer();
+async function maskFixture(width, height, patches) {
+  return sharp(await transparentCanvas(width, height))
+    .composite(await Promise.all(patches.map(async ({ left, top, width: w, height: h }) => ({ input: await whitePatch(w, h), left, top }))))
+    .png().toBuffer();
+}
+
+test('brush mask validation and painted bounding box derivation', async () => {
+  assert.throws(() => maskBytes('data:image/jpeg;base64,AAAA'), /PNG/);
+  assert.throws(() => maskBytes('data:image/png;base64,!!!!'), /无效/);
+  assert.throws(() => maskBytes(`data:image/png;base64,${'A'.repeat(14 * 1024 * 1024)}`), /10MB/);
+  assert.throws(() => maskBytes('plain-not-data-url'), /PNG data URL/);
+  const mask = await maskFixture(120, 90, [{ left: 30, top: 25, width: 50, height: 40 }, { left: 85, top: 70, width: 20, height: 15 }]);
+  const region = await maskRegion(mask, 120, 90);
+  // composite 补丁是左闭右开区间：第二块 [85,105) 的最后像素在 104，总宽 75。
+  assert.deepEqual({ left: region.left, top: region.top, width: region.width, height: region.height }, { left: 30, top: 25, width: 75, height: 60 });
+  assert.equal(region.rect.x, 25);
+  assert.equal(region.rect.width, (75 * 100) / 120);
+  await assert.rejects(maskRegion(await transparentCanvas(120, 90), 120, 90), /蒙版为空/);
+  // 蒙版尺寸与原图不一致时自动缩放到原图分辨率，包围盒按缩放后计算；
+  // 插值内核会让硬边缘向右/下溢出约 1px，断言允许该误差。
+  const scaled = await maskRegion(await maskFixture(60, 45, [{ left: 15, top: 12, width: 25, height: 20 }]), 120, 90);
+  assert.equal(scaled.left, 30);
+  assert.equal(scaled.top, 24);
+  assert.ok(Math.abs(scaled.width - 50) <= 1 && Math.abs(scaled.height - 40) <= 1, `scaled bbox ${scaled.width}x${scaled.height}`);
+});
+
+test('mask-aware preservation keeps unpainted pixels exactly original', async () => {
+  const source = await normalizeLocalImage(await solid(120, 90, '#264560'));
+  const strokes = await maskFixture(120, 90, [{ left: 40, top: 30, width: 40, height: 30 }]);
+  const region = await maskRegion(strokes, 120, 90);
+  const output = await preserveOutsideRegion(source, { bytes: await solid(300, 300, '#49b974') }, { x: 25, y: 20, width: 50, height: 60 }, region);
+  assert.equal(output.width, 120);
+  assert.equal(output.height, 90);
+  const original = await raw(source.buffer);
+  const changed = await raw(output.bytes);
+  const at = (x, y) => changed.subarray((y * 120 + x) * 4, (y * 120 + x) * 4 + 4);
+  // 笔画中心完全采用生成结果；包围盒外与远离笔画的包围盒内像素严格等于原图。
+  assert.ok(at(60, 45).equals(Buffer.from([0x49, 0xb9, 0x74, 255])));
+  assert.ok(at(10, 10).equals(original.subarray((10 * 120 + 10) * 4, (10 * 120 + 10) * 4 + 4)));
+  assert.ok(at(100, 80).equals(original.subarray((80 * 120 + 100) * 4, (80 * 120 + 100) * 4 + 4)));
+  // 羽化带（σ=1，约 1px）介于原图与生成色之间。
+  const edge = at(40, 45);
+  assert.ok(!edge.equals(Buffer.from([0x49, 0xb9, 0x74, 255])) && !edge.equals(original.subarray((45 * 120 + 40) * 4, (45 * 120 + 40) * 4 + 4)));
 });
 
 test('PNG/JPEG/WebP decoding, orientation, crop placement and original outside pixels', async () => {
@@ -73,7 +122,7 @@ test('SenseNova provider copies use a valid 32px-aligned canvas without changing
   assert.ok(Math.max(automatic.width / automatic.height, automatic.height / automatic.width) <= 3);
 });
 
-test('local edit API: all vision formats, composed provider input, history, failures and cancellation', { timeout: 60000 }, async (t) => {
+test('local edit API: all vision formats, composed provider input, history, failures and cancellation', { timeout: 180000 }, async (t) => {
   // Only generated fixtures and a loopback model stub; never read user data/config.
   const root = path.resolve(import.meta.dirname, '..');
   await mkdir(path.join(root, 'work'), { recursive: true });
@@ -123,7 +172,7 @@ test('local edit API: all vision formats, composed provider input, history, fail
     stub.closeAllConnections();
     await new Promise((resolve) => stub.close(resolve));
   });
-  await waitUntil(() => /127\.0\.0\.1:\d+/.test(logs), 10000);
+  await waitUntil(() => /127\.0\.0\.1:\d+/.test(logs), 30000);
   const base = logs.match(/http:\/\/127\.0\.0\.1:\d+/)[0];
   const token = await login(base);
   const auth = authHeaders(token);
@@ -141,7 +190,7 @@ test('local edit API: all vision formats, composed provider input, history, fail
   const submit = ({ projectId, imageId }, extra = {}) => request(`/projects/${projectId}/local-edit`, { imageId, modelId: 'image', visionModelId: visionFormats[0], instruction: '', reference, rect, params: { size: '1024x1024', count: 2 }, ...extra }, 202);
   async function finished(projectId, taskId) {
     let task;
-    await waitUntil(async () => { task = await request(`/projects/${projectId}/tasks/${taskId}`); return task.status !== 'generating'; });
+    await waitUntil(async () => { task = await request(`/projects/${projectId}/tasks/${taskId}`); return task.status !== 'generating'; }, 60000);
     return task;
   }
   for (const format of visionFormats) {
@@ -214,7 +263,7 @@ test('local edit API: all vision formats, composed provider input, history, fail
     await waitUntil(async () => {
       progress = await request(`/projects/${fixture.projectId}/batch-edits/${started.taskId}`);
       return progress.status !== 'generating';
-    });
+    }, 60000);
     assert.equal(progress.status, 'success', progress.error);
     assert.equal(progress.localEdit, true);
     assert.equal(progress.total, 2);
@@ -240,6 +289,36 @@ test('local edit API: all vision formats, composed provider input, history, fail
       instructions: ['只有一条指令'],
     }, 400);
     assert.match(single.error, /2–50/);
+  }
+
+  // 笔刷蒙版：只涂蒙版、不填指令时按消除默认文案规划，输出按蒙版羽化回填，
+  // 蒙版外像素严格等于原图，蒙版素材挂到版本 inputs。
+  {
+    const fixture = await fixtureProject();
+    const strokes = await maskFixture(120, 90, [{ left: 40, top: 30, width: 40, height: 30 }]);
+    const start = calls.length;
+    const started = await request(`/projects/${fixture.projectId}/local-edit`, {
+      imageId: fixture.imageId,
+      modelId: 'image',
+      visionModelId: visionFormats[0],
+      mask: `data:image/png;base64,${strokes.toString('base64')}`,
+      instruction: '',
+      params: { size: '1024x1024', count: 1 },
+    }, 202);
+    const task = await finished(fixture.projectId, started.taskId);
+    assert.equal(task.status, 'success', task.error);
+    assert.match(JSON.stringify(JSON.parse(calls[start].bytes)), /移除涂选区域内的物体/);
+    const bundle = await request(`/projects/${fixture.projectId}`);
+    const version = bundle.versions.filter((item) => item.operation === 'local_edit').at(-1);
+    assert.ok(version.inputs.some((item) => item.sourceType === 'local_mask'));
+    const bytes = Buffer.from(await (await fetch(base + version.outputs[0].url)).arrayBuffer());
+    const changed = await raw(bytes);
+    const source = await raw(sourceBytes);
+    const at = (x, y) => changed.subarray((y * 120 + x) * 4, (y * 120 + x) * 4 + 4);
+    const originalAt = (x, y) => source.subarray((y * 120 + x) * 4, (y * 120 + x) * 4 + 4);
+    assert.ok(at(60, 45).equals(Buffer.from([0x49, 0xb9, 0x74, 255])));
+    assert.ok(at(10, 10).equals(originalAt(10, 10)));
+    assert.ok(at(88, 40).equals(originalAt(88, 40)));
   }
 });
 

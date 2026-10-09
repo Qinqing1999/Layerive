@@ -149,20 +149,86 @@ export async function composeLocalReference(source, reference, plan) {
   return { buffer, mime_type: 'image/png', width: source.width, height: source.height, crop, target };
 }
 
+// Validate a client-uploaded brush mask: a data-URL encoded static PNG whose
+// white (opaque) strokes mark the editable region. Frontend always sends the
+// mask at the source image's natural resolution; other sizes get resized.
+export function maskBytes(mask) {
+  if (typeof mask !== 'string') throw invalid('蒙版数据无效');
+  const encoded = mask.replace(/^data:image\/png;base64,/, '');
+  if (encoded === mask || !encoded) throw invalid('蒙版仅支持 PNG data URL');
+  if (encoded.length > Math.ceil(10 * 1024 * 1024 / 3) * 4) throw invalid('蒙版不能超过 10MB');
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) throw invalid('蒙版数据无效，请重新涂抹后再试');
+  const bytes = Buffer.from(encoded, 'base64');
+  if (!bytes.length || bytes.length > 10 * 1024 * 1024) throw invalid('蒙版不能超过 10MB');
+  return bytes;
+}
+
+// Decode the mask into a single-channel weight map aligned with the source
+// image, then derive the painted bounding box. Alpha below 6% counts as
+// unpainted so faint brush edges do not inflate the planning rect.
+export async function maskRegion(bytes, width, height) {
+  const metadata = await sharp(bytes, decodeOptions).metadata();
+  if (metadata.format !== 'png' || (metadata.pages || 1) > 1) throw invalid('蒙版仅支持静态 PNG');
+  const maskWidth = metadata.width;
+  const maskHeight = metadata.height;
+  if (!maskWidth || !maskHeight) throw invalid('无法读取蒙版尺寸');
+  const aligned = await sharp(bytes, decodeOptions).ensureAlpha()
+    .resize(width, height, { fit: 'fill' }).raw().toBuffer();
+  let left = width;
+  let top = height;
+  let right = -1;
+  let bottom = -1;
+  for (let y = 0; y < height; y++) {
+    const row = y * width * 4 + 3;
+    for (let x = 0; x < width; x++) {
+      if (aligned[row + x * 4] > 16) {
+        if (x < left) left = x;
+        if (x > right) right = x;
+        if (y < top) top = y;
+        if (y > bottom) bottom = y;
+      }
+    }
+  }
+  if (right < 0) throw invalid('蒙版为空，请先在图片上涂选要修改的区域');
+  return {
+    weights: aligned,
+    left,
+    top,
+    width: right - left + 1,
+    height: bottom - top + 1,
+    rect: {
+      x: left * 100 / width,
+      y: top * 100 / height,
+      width: (right - left + 1) * 100 / width,
+      height: (bottom - top + 1) * 100 / height,
+    },
+    maskWidth,
+    maskHeight,
+  };
+}
+
 // Copy only the generated region into decoded source pixels. Blend inward at
 // the boundary; pixels outside the selection remain exactly the original RGBA.
-export async function preserveOutsideRegion(source, output, rect) {
+// With a brush mask, the per-pixel weight comes from the (feathered) mask
+// alpha instead of the rectangular distance ramp.
+export async function preserveOutsideRegion(source, output, rect, mask = null) {
   const { width, height } = source;
   const region = pixelRect(rect, width, height);
   const original = await sharp(source.buffer, decodeOptions).ensureAlpha().raw().toBuffer();
   const generated = await sharp(output.bytes, decodeOptions).autoOrient().toColourspace('srgb')
     .resize(width, height, { fit: 'fill' }).ensureAlpha().raw().toBuffer();
   const feather = Math.max(1, Math.min(12, Math.round(Math.min(region.width, region.height) * 0.025)));
+  const weights = mask
+    ? await sharp(mask.weights, { raw: { width, height, channels: 4 } }).extractChannel(3).blur(feather).raw().toBuffer()
+    : null;
   // 分块处理：每 64 行 yield 一次，让 event loop 有机会 GC，避免大图阻塞
   for (let y = 0; y < region.height; y++) {
     if (y % 64 === 0) await new Promise((r) => setImmediate(r));
     for (let x = 0; x < region.width; x++) {
-      const weight = Math.min(1, (Math.min(x, y, region.width - 1 - x, region.height - 1 - y) + 1) / feather);
+      const weight = weights
+        ? weights[((region.top + y) * width + region.left + x)] / 255
+        : Math.min(1, (Math.min(x, y, region.width - 1 - x, region.height - 1 - y) + 1) / feather);
+      if (weight <= 0) continue;
       const offset = ((region.top + y) * width + region.left + x) * 4;
       for (let c = 0; c < 4; c++) original[offset + c] = Math.round(original[offset + c] * (1 - weight) + generated[offset + c] * weight);
     }

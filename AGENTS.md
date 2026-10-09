@@ -43,7 +43,7 @@
   - 共同行为：每完成一张立即写入同一个版本并由轮询接口返回，画布下方实时展示缩略图、已完成/失败/剩余数量和按已处理项平均耗时计算的预估剩余时间；单项失败继续下一项，支持取消且保留已完成图片。
 - 项目风格提示词：只自动叠加到无输入图的文生图请求。
 - 图片改字：视觉模型识别图片文字为分段内容；用户可修改、删除或框选区域手动新增文字，再由视觉模型规划图片编辑提示词。点击“提交并改图”后立即关闭编辑弹窗并回到项目对话，从视觉规划阶段开始展示等待状态；创建失败时自动恢复弹窗和编辑内容。任务成功后，每张输出图都会按本次替换、删除和新增结果保存当前文字快照（包括空快照），用同一视觉模型配置继续改字时直接读取，不再重复识别。
-- 局部编辑：支持从画布图片内外起拖并越界框选，最终取图片内有效百分比选区。选区浮窗支持文字要求，或上传 / Ctrl+V 粘贴参考图（静态 PNG/JPEG/WebP，最大 10MB）。有参考图时文字可留空：视觉模型同时理解原图、选区与参考图，推断替换意图并返回两图主体坐标；后台裁剪参考主体、等比缩放并粘贴至目标位置，图片模型再按场景融合轮廓、背景、光影、透视和连接处。参考图模式最终仅回填选区内生成结果，边界向内羽化，框外保留原图解码后的像素，并以原图尺寸保存 PNG；纯文字方式继续使用原有模型输出。定位失败或目标超出选区时停止，不盲目拼贴。视觉规划、合成、生成、框外保留均在可取消任务中运行。选区浮窗的操作行提供「批量修改」入口：点击后在浮窗右侧展开批量面板，每行一条指令（2–50 条、单条 ≤1000 字符，可粘贴多行），复用 `/local-edit-batch`（任务 `operation_type` 仍为 `batch_edit`、版本 `operation_type` 为 `local_edit`）逐张运行同一条局部修改流水线并把全部输出追加到同一版本；若浮窗已附参考图，所有指令共用该参考图（此时强制 PNG 输出）。进度复用画布下方的批量进度面板（`localEdit` 标记区分文案），支持取消并保留已完成图片。
+- 局部编辑：支持两种圈选方式——「拖拽框选」可从画布图片内外起拖并越界框选，最终取图片内有效百分比选区；「笔刷涂抹」在图片上叠加蒙版画布（长边 1024、保持原图比例），画笔涂抹 / 橡皮修整 / 笔刷大小与边缘羽化（0–8px，`ctx.filter = blur()` 柔化笔画）/ 清除，导出静态 PNG data URL（≤10MB）随请求发送 `mask` 字段，服务端按蒙版 alpha 包围盒（外扩 1.5% 上下文）推导编辑区域，蒙版外像素严格保留原图、蒙版内按 alpha 权重羽化回填。两种方式互斥，切换时丢弃另一方式的选区。选区浮窗支持文字要求，或上传 / Ctrl+V 粘贴参考图（静态 PNG/JPEG/WebP，最大 10MB）。有参考图时文字可留空；涂抹模式下不附参考图且文字留空时按「移除涂选内容并自然补全背景」处理（按钮显示「涂抹消除」）。有参考图时视觉模型同时理解原图、选区与参考图，推断替换意图并返回两图主体坐标；后台裁剪参考主体、等比缩放并粘贴至目标位置，图片模型再按场景融合轮廓、背景、光影、透视和连接处。参考图模式最终仅回填选区内生成结果，边界向内羽化，框外保留原图解码后的像素，并以原图尺寸保存 PNG；纯文字方式继续使用原有模型输出。定位失败或目标超出选区时停止，不盲目拼贴。视觉规划、合成、生成、框外保留均在可取消任务中运行。选区浮窗的操作行提供「批量修改」入口：点击后在浮窗右侧展开批量面板，每行一条指令（2–50 条、单条 ≤1000 字符，可粘贴多行），复用 `/local-edit-batch`（任务 `operation_type` 仍为 `batch_edit`、版本 `operation_type` 为 `local_edit`）逐张运行同一条局部修改流水线并把全部输出追加到同一版本，支持框选 rect 与笔刷蒙版两种输入且所有指令共用同一蒙版；若浮窗已附参考图，所有指令共用该参考图（此时强制 PNG 输出）。进度复用画布下方的批量进度面板（`localEdit` 标记区分文案），支持取消并保留已完成图片。
 - 图片变清晰：对当前图片调用图片模型的改图能力，提升细节和清晰度，同时约束模型保持原图的主体、文字、构图、比例、颜色和风格不变。
 - 扩图：面板先按原图比例预选「原比例」目标（向四周自然补全），并列出主流比例（1:1、16:9、9:16、4:3、3:4、3:2、2:3，经 `mainstreamSizeOptions()` 映射到当前模型支持尺寸、按目标尺寸去重）与全部支持尺寸两组按钮；选定目标尺寸后以原图为核心自然补全新增画布区域。
 - 去水印：视觉模型先判断 / 定位水印；确认存在后调用图片编辑模型修复遮挡区域。
@@ -189,7 +189,7 @@ work/                       临时工作目录（被 Git 忽略）
 - 局部编辑提交后立刻显示等待状态，取得任务 ID 后收起浮窗，并按任务 `stage` 显示视觉定位 / 合成 / 生成 / 框外还原进度。失败或取消时在同一工作台会话恢复选区、文字与参考图；成功后清空。参考图只在本次操作中使用，不替换当前画布或项目草稿；切换画布图片会清除旧参考图并使未完成的文件读取失效。局部编辑浮窗有选区时，图片粘贴优先进入参考图，文本框仍保持文本优先。
 - 监听 document 的 `paste` 事件：剪贴板含图片时复用上传流程（画布可直接 Ctrl+V 贴图）；文本框内文本优先，上传进行中忽略重复粘贴。
 - 维护当前查看图片、下一次编辑的输入图片、尺寸、输出格式、数量、透明背景等本地状态。工作台不再提供图片模型 / 视觉识别模型选择：图片生成一律使用管理员设置的默认图片模型，视觉理解统一使用默认识别模型（组件仍把该模型 ID 以 `visionModelId` 随视觉请求发送，便于服务端严格校验与识别缓存命中）。
-- 使用百分比坐标 `{ x, y, width, height }` 记录文字/局部编辑/提取素材选区；局部编辑和提取素材通过画布级 Pointer Events 与指针捕获支持从图片外起拖及越界拖拽，再将结果限制为图片内 0–100% 的有效交集；选区显示层必须以 `inset: 0` 对齐图片内容边缘，不能因容器已有边框而再次向内缩进；服务端和视觉模型提示词均以此为准。
+- 使用百分比坐标 `{ x, y, width, height }` 记录文字/局部编辑/提取素材选区；局部编辑和提取素材通过画布级 Pointer Events 与指针捕获支持从图片外起拖及越界拖拽，再将结果限制为图片内 0–100% 的有效交集；笔刷涂抹模式由蒙版画布上的 Pointer Events 接管（`stopPropagation` 阻断画布级框选处理），指针坐标按画布显示尺寸换算到蒙版分辨率；选区显示层必须以 `inset: 0` 对齐图片内容边缘，不能因容器已有边框而再次向内缩进；服务端和视觉模型提示词均以此为准。
 - 提取素材在圈选完成后立即用 canvas 生成截图预览（`cropImageRegion()`），提交时随请求发送截图 base64；局部修改与提取素材、扩图等模式互斥，切换时自动关闭其他模式。
 - 在版本树中按父子关系布局；从历史节点继续编辑会成为新的分支。
 
@@ -299,8 +299,8 @@ work/                       临时工作目录（被 Git 忽略）
 | `/api/projects/:id/batch-generate` | POST | 创建批量文生图任务（无输入图）：`modelId`、同上的 `template` / `quantity` / `variables` 或 `prompts` 录入方式、可选 `stylePrompt`（≤2000 字符，追加到每条提示词）与 `parentVersionId` / `params`；要求模型具备 `text_to_image` 能力，返回任务和预建 `batch_generate` 版本 ID，进度走 `/batch-edits/:taskId` |
 | `/api/projects/:id/batch-edits/:taskId` | GET | 查询逐项批量进度（兼容 `batch_edit` / `batch_generate`）、即时输出图片、完成/失败/剩余数量、`textBatch` / `localEdit` 标记及 ETA |
 | `/api/projects/:id/{recognize-text,edit-text,local-edit,outpaint,enhance,remove-watermark,extract-asset}` | POST | 专项图片操作；使用视觉能力的请求可传 `visionModelId` |
-| `/api/projects/:id/local-edit` | POST | `imageId`、`modelId`、`visionModelId?`、百分比 `rect`、`instruction`、`params?`；可附 `reference: { data, mimeType, name? }`，有参考图时 instruction 可为空；校验后即返回 202，后台规划与合成 |
-| `/api/projects/:id/local-edit-batch` | POST | 批量局部修改：`imageId`、`modelId`、`visionModelId?`、百分比 `rect`、`instructions: string[]`（2–50 条、单条 ≤1000 字符）、可选 `reference` / `parentVersionId` / `params`；每个子项独立运行局部修改流水线（含各自视觉规划与合成素材），逐张追加到同一 `local_edit` 版本，返回任务和预建版本 ID，进度走 `/batch-edits/:taskId` |
+| `/api/projects/:id/local-edit` | POST | `imageId`、`modelId`、`visionModelId?`、百分比 `rect` 或 PNG data URL `mask`（二选一，`mask` 时按蒙版 alpha 包围盒自动推导 rect）、`instruction`、`params?`；可附 `reference: { data, mimeType, name? }`，有参考图时 instruction 可为空；涂抹模式无参考图且留空 instruction 时按移除补全背景处理；校验后即返回 202，后台规划与合成 |
+| `/api/projects/:id/local-edit-batch` | POST | 批量局部修改：`imageId`、`modelId`、`visionModelId?`、百分比 `rect` 或 PNG data URL `mask`（二选一）、`instructions: string[]`（2–50 条、单条 ≤1000 字符）、可选 `reference` / `parentVersionId` / `params`；每个子项独立运行局部修改流水线（含各自视觉规划与合成素材），逐张追加到同一 `local_edit` 版本，返回任务和预建版本 ID，进度走 `/batch-edits/:taskId` |
 | `/api/projects/:id/tasks`、`/tasks/:taskId`、`/tasks/:taskId/cancel` | GET / GET / POST | 查询和取消生成任务 |
 | `/api/projects/:id/tasks/:taskId` | GET | 单任务响应含可选 `stage: planning / compositing / generating / preserving`，旧任务为 null |
 | `/api/projects/:id/versions/:versionId` | DELETE | 软删除版本，可加 `?force=1` |

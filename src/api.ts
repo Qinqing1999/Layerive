@@ -96,9 +96,9 @@ export const api = {
     request<{ segments: TextSegment[]; modelName: string; cached: boolean }>(`/api/projects/${id}/recognize-text`, { method: 'POST', body: JSON.stringify({ imageId, visionModelId }) }),
   editText: (id: string, input: { imageId: string; modelId: string; visionModelId?: string; parentVersionId?: string | null; segments: TextSegment[]; params?: Record<string, unknown> }) =>
     request<GenerateResult>(`/api/projects/${id}/edit-text`, { method: 'POST', body: JSON.stringify(input) }),
-  localEdit: (id: string, input: { imageId: string; modelId: string; visionModelId?: string; parentVersionId?: string | null; instruction: string; reference?: LocalEditReference; rect: { x: number; y: number; width: number; height: number }; params?: Record<string, unknown> }) =>
+  localEdit: (id: string, input: { imageId: string; modelId: string; visionModelId?: string; parentVersionId?: string | null; instruction: string; reference?: LocalEditReference; rect?: { x: number; y: number; width: number; height: number }; mask?: string; params?: Record<string, unknown> }) =>
     request<GenerateResult>(`/api/projects/${id}/local-edit`, { method: 'POST', body: JSON.stringify(input) }),
-  localEditBatch: (id: string, input: { imageId: string; modelId: string; visionModelId?: string; parentVersionId?: string | null; rect: { x: number; y: number; width: number; height: number }; instructions: string[]; reference?: LocalEditReference; params?: Record<string, unknown> }) =>
+  localEditBatch: (id: string, input: { imageId: string; modelId: string; visionModelId?: string; parentVersionId?: string | null; rect?: { x: number; y: number; width: number; height: number }; mask?: string; instructions: string[]; reference?: LocalEditReference; params?: Record<string, unknown> }) =>
     request<BatchEditResult>(`/api/projects/${id}/local-edit-batch`, { method: 'POST', body: JSON.stringify(input) }),
   outpaint: (id: string, input: { imageId: string; modelId: string; parentVersionId?: string | null; size: string; params?: Record<string, unknown> }) =>
     request<GenerateResult>(`/api/projects/${id}/outpaint`, { method: 'POST', body: JSON.stringify(input) }),
