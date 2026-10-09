@@ -1,5 +1,5 @@
 import React, { Component, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
+import { SafeAreaProvider, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler, setConnectionChangeHandler, setConnectionRetryHandler, pingServer } from './api';
@@ -241,8 +241,11 @@ const errorBoundaryStyles = StyleSheet.create({
 });
 
 function ToastView({ toast, colors }: { toast: Toast; colors: ReturnType<typeof useTheme>['colors'] }) {
+  const insets = useSafeAreaInsets();
+  // 定位在 topbar + actionBar 下方（画布顶部），不遮挡上传/拍照/保存按钮和底部工具栏
+  const topOffset = insets.top + 100;
   return (
-    <View style={[toastStyles.toast, toast.kind === 'error' && { borderColor: colors.danger }, { backgroundColor: colors.card }]}>
+    <View style={[toastStyles.toast, { top: topOffset }, toast.kind === 'error' && { borderColor: colors.danger }, { backgroundColor: colors.card }]}>
       <Icon name={toast.kind === 'success' ? 'check' : 'close'} size={16} color={toast.kind === 'error' ? colors.danger : colors.success} />
       <Text style={[toastStyles.toastMsg, { color: colors.text }]}>{toast.message}</Text>
     </View>
@@ -275,8 +278,7 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
 
 const toastStyles = StyleSheet.create({
   toast: {
-    // 顶部显示：避免遮挡画布底部工具栏/输入栏
-    position: 'absolute', top: 100, left: spacing.lg, right: spacing.lg,
+    position: 'absolute', left: spacing.lg, right: spacing.lg,
     padding: spacing.md, borderRadius: radius.md,
     borderWidth: 1, borderColor: 'transparent', flexDirection: 'row',
     alignItems: 'center', gap: spacing.sm, elevation: 10,
