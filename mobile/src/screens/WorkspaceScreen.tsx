@@ -30,7 +30,7 @@ import { TASK_OPERATION_LABELS, formatTaskTime } from '../labels';
 import { closestSizeForDimensions, outpaintPresets } from '../sizes';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
-import type { GenerateResult, GenerationTask, LocalEditReference, Message, ModelConfig, ProjectBundle, ProjectImage, Version } from '../types';
+import type { GenerateResult, GenerationTask, LocalEditReference, Message, ModelConfig, ProjectBundle, ProjectImage, UserProfile, Version } from '../types';
 import { Icon } from '../components/Icon';
 import { CropView } from '../components/CropView';
 import { ModalSheet } from '../components/ModalSheet';
@@ -40,12 +40,43 @@ import { EditTextModal } from './workspace/EditTextModal';
 import { BatchModal } from './workspace/BatchModal';
 import { GalleryModal } from './workspace/GalleryModal';
 import { TaskHistorySheet } from './workspace/TaskHistorySheet';
+import type { WatermarkConfig } from '../types';
+
+/** 平铺文字水印层（画布上叠加，pointerEvents="none" 不拦截触摸） */
+function WatermarkLayer({ config, width, height }: { config: WatermarkConfig; width: number; height: number }) {
+  const cols = Math.ceil(width / config.spacing) + 2;
+  const rows = Math.ceil(height / config.spacing) + 2;
+  const items: React.ReactNode[] = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const offsetX = (r % 2) * (config.spacing / 2);
+      items.push(
+        <Text
+          key={`wm-${r}-${c}`}
+          style={{
+            position: 'absolute',
+            left: c * config.spacing + offsetX,
+            top: r * config.spacing,
+            fontSize: config.fontSize,
+            color: config.color,
+            opacity: config.opacity,
+            transform: [{ rotate: `${config.rotation}deg` }],
+          }}
+        >
+          {config.text}
+        </Text>
+      );
+    }
+  }
+  return <View style={StyleSheet.absoluteFill} pointerEvents="none">{items}</View>;
+}
 
 type Props = {
   projectId: string;
   models: ModelConfig[];
   activeModel: string;
   activeVisionModel: string;
+  userProfile: UserProfile | null;
   onBack: () => void;
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
@@ -108,7 +139,7 @@ const SELECT_HINTS: Record<'localEdit' | 'extract', string> = {
   extract: '圈选想提取的主体（允许带少量背景）',
 };
 
-export function WorkspaceScreen({ projectId, models, activeModel, activeVisionModel, onBack, notify }: Props) {
+export function WorkspaceScreen({ projectId, models, activeModel, activeVisionModel, userProfile, onBack, notify }: Props) {
   const { colors } = useTheme();
   const styles = makeStyles(colors);
   const [bundle, setBundle] = useState<ProjectBundle | null>(null);
@@ -971,18 +1002,70 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
 
   /** 直接保存到手机相册/下载文件夹 */
   async function saveCurrentImage() {
-    if (!currentImage) { notify('没有当前图片', 'error'); return; }
-    const fullUrl = resolveUrl(currentImage.url);
+    if (!currentImage || !bundle) { notify('没有当前图片', 'error'); return; }
+    const isVip = userProfile?.isVip ?? false;
+    const remaining = userProfile?.remainingQuota ?? 0;
+    const watermarkEnabled = userProfile?.watermark?.enabled ?? false;
+
+    // VIP 用户或水印未启用：直接保存原图
+    if (isVip || !watermarkEnabled) {
+      await doSaveImage(currentImage.url, currentImage.id);
+      return;
+    }
+
+    // 非 VIP 且水印启用：需要消耗免水印次数
+    if (remaining <= 0) {
+      Alert.alert(
+        '今日免费次数已用完',
+        '开通 VIP 可不限次数保存无水印原图，或明天再来。',
+        [
+          { text: '知道了', style: 'cancel' },
+        ],
+      );
+      return;
+    }
+
+    // 有剩余次数：弹确认
+    Alert.alert(
+      '保存无水印原图',
+      `将消耗 1 次免水印机会保存原图（今日剩余 ${remaining} 次）`,
+      [
+        { text: '取消', style: 'cancel' },
+        {
+          text: '保存',
+          onPress: async () => {
+            try {
+              setBusyLabel('正在获取无水印原图…');
+              const result = await api.watermarkSave(bundle.project.current_version_id || '');
+              // 更新本地 userProfile 剩余次数
+              if (userProfile) {
+                userProfile.remainingQuota = result.remainingQuota;
+              }
+              await doSaveImage(result.downloadUrl, currentImage.id);
+              notify(`已保存，今日剩余 ${result.remainingQuota} 次`);
+            } catch (e) {
+              notify((e as Error).message, 'error');
+            } finally {
+              setBusyLabel('');
+            }
+          },
+        },
+      ],
+    );
+  }
+
+  /** 实际下载并保存图片到相册 */
+  async function doSaveImage(url: string, imageId: string) {
+    const fullUrl = resolveUrl(url);
     if (!fullUrl) { notify('图片地址无效', 'error'); return; }
     const ext = /\.png($|\?)/i.test(fullUrl) ? 'png' : /\.webp($|\?)/i.test(fullUrl) ? 'webp' : 'jpg';
     try {
       setBusyLabel('正在保存…');
-      const uri = await downloadToCache(fullUrl, `layerive-${currentImage.id}.${ext}`);
+      const uri = await downloadToCache(fullUrl, `layerive-${imageId}.${ext}`);
       setBusyLabel('');
       if (await Sharing.isAvailableAsync()) {
         const mimeType = ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
         await Sharing.shareAsync(uri, { mimeType, dialogTitle: '保存到相册' });
-        notify('已保存到相册');
       } else {
         notify('系统分享不可用，请重试', 'error');
       }
@@ -1354,6 +1437,12 @@ export function WorkspaceScreen({ projectId, models, activeModel, activeVisionMo
                 style={{ width: '100%', height: '100%' }}
                 resizeMode={imageDisplay ? 'stretch' : 'contain'}
               />
+              {/* 非 VIP 用户叠加水印 */}
+              {userProfile && !userProfile.isVip && userProfile.watermark?.enabled && imageDisplay && (
+                <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                  <WatermarkLayer config={userProfile.watermark} width={imageDisplay.w} height={imageDisplay.h} />
+                </View>
+              )}
             </Pressable>
           ) : (
             <Pressable style={styles.canvasEmpty} onPress={pickImage}>

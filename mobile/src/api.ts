@@ -1,6 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system';
-import { API_BASE, type BatchEditProgress, type BatchEditResult, type GenerateResult, type GenerationTask, type GalleryEntryItem, type ModelConfig, type ModelsPayload, type Project, type ProjectBundle, type TextSegment, type AdminSettings, type AdminUser } from './types';
+import { API_BASE, type BatchEditProgress, type BatchEditResult, type GenerateResult, type GenerationTask, type GalleryEntryItem, type ModelConfig, type ModelsPayload, type Project, type ProjectBundle, type TextSegment, type AdminSettings, type AdminUser, type UserProfile, type WatermarkConfig, type QuotaConfig, type WatermarkSaveResult, type WatchAdResult, type SetVipResult, type AdjustQuotaResult } from './types';
 
 const AUTH_TOKEN_KEY = 'pixelforge-auth-token';
 const SERVER_BASE_KEY = 'pixelforge-server-base';
@@ -185,12 +185,14 @@ async function fetchOnce<T>(path: string, init?: { method?: string; body?: unkno
       signal: controller.signal,
     });
   } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') {
+    // RN Android release 环境下没有 DOMException 全局对象，不能用 instanceof
+    const errName = (e as any)?.name || '';
+    if (errName === 'AbortError') {
       markOffline();
       throw new Error('请求超时，请检查网络连接');
     }
     markOffline();
-    throw new Error(`网络请求失败：${(e as Error).message}`);
+    throw new Error(`网络请求失败：${(e as Error).message || errName || '未知错误'}`);
   } finally {
     clearTimeout(timer);
   }
@@ -347,6 +349,24 @@ export const api = {
   adminSettings: () => request<AdminSettings>('/api/admin/settings'),
   updateAdminSettings: (input: Partial<AdminSettings>) =>
     request<AdminSettings>('/api/admin/settings', { method: 'PUT', body: input }),
+
+  // ---- 用户侧：VIP / 水印 / 配额 ----
+  userProfile: () => request<UserProfile>('/api/user/profile'),
+  watermarkSave: (imageVersionId: string) =>
+    request<WatermarkSaveResult>('/api/user/watermark-save', { method: 'POST', body: { imageVersionId } }),
+  watchAd: () => request<WatchAdResult>('/api/user/watch-ad', { method: 'POST' }),
+
+  // ---- 管理侧：VIP / 水印 / 配额 ----
+  setUserVip: (username: string, vipType: 'permanent' | 'subscription' | null, vipExpiresAt?: string | null) =>
+    request<SetVipResult>(`/api/admin/users/${encodeURIComponent(username)}/vip`, { method: 'PUT', body: { vipType, vipExpiresAt: vipExpiresAt ?? null } }),
+  adjustUserQuota: (username: string, dailyFree?: number, bonusCredits?: number) =>
+    request<AdjustQuotaResult>(`/api/admin/users/${encodeURIComponent(username)}/quota`, { method: 'PUT', body: { dailyFree, bonusCredits } }),
+  watermarkConfig: () => request<WatermarkConfig>('/api/admin/watermark'),
+  updateWatermarkConfig: (input: Partial<WatermarkConfig>) =>
+    request<WatermarkConfig>('/api/admin/watermark', { method: 'PUT', body: input }),
+  quotaConfig: () => request<QuotaConfig>('/api/admin/quota-config'),
+  updateQuotaConfig: (input: Partial<QuotaConfig>) =>
+    request<QuotaConfig>('/api/admin/quota-config', { method: 'PUT', body: input }),
 };
 
 // Resolve relative image URLs to absolute

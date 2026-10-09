@@ -4,8 +4,8 @@ import { Platform } from 'react-native';
 export const API_BASE = __DEV__
   ? Platform.OS === 'android'
     ? 'http://10.0.2.2:8788'  // Android 模拟器
-    : 'http://127.0.0.1:8788'  // iOS 模拟器 / 物理设备
-  : 'http://192.168.43.7:8788'; // 本地开发服务器（含 upload 建版本 + 对话引用修复），可在设置页改为远程地址
+    : 'http://192.168.43.146:8788'  // 物理设备（开发机 IP）
+  : 'http://192.168.43.146:8788'; // 生产环境
 
 // Shared types (from web version)
 export type ModelConfig = {
@@ -153,5 +153,54 @@ export type GalleryEntryItem = {
 
 export type LocalEditReference = { data: string; mimeType: string; name?: string };
 
-export type AdminUser = { username: string; role: 'admin' | 'user' };
+export type AdminUser = { username: string; role: 'admin' | 'user'; vipType: 'permanent' | 'subscription' | null; vipExpiresAt: string | null; watermarkQuota: { dailyFree: number; bonusCredits: number; adCredits: number; dailyUsed: number; vipUsedToday: number; lastResetDate: string } };
 export type AdminSettings = { queueConcurrency: number };
+
+// ---- VIP / 水印 / 配额 ----
+export type WatermarkConfig = {
+  enabled: boolean;
+  text: string;
+  fontSize: number;
+  opacity: number;
+  rotation: number;
+  spacing: number;
+  color: string;
+};
+
+export type QuotaConfig = {
+  defaultDailyFree: number;
+  defaultAdCredits: number;
+  vipDailyLimit: number;
+  adEnabled: boolean;
+};
+
+export type UserProfile = {
+  username: string;
+  role: 'admin' | 'user';
+  isVip: boolean;
+  vipType: 'permanent' | 'subscription' | null;
+  vipExpiresAt: string | null;
+  remainingQuota: number; // Infinity 表示无限制
+  watermark: WatermarkConfig;
+};
+
+export type WatermarkSaveResult = {
+  downloadUrl: string;
+  remainingQuota: number;
+};
+
+export type WatchAdResult = {
+  credits: number;
+  remainingQuota: number;
+};
+
+export type SetVipResult = {
+  username: string;
+  vipType: 'permanent' | 'subscription' | null;
+  vipExpiresAt: string | null;
+};
+
+export type AdjustQuotaResult = {
+  username: string;
+  watermarkQuota: AdminUser['watermarkQuota'];
+};

@@ -5,7 +5,7 @@ import { StatusBar } from 'expo-status-bar';
 import { getAuthToken, api, clearAuthToken, initServerBase, setSessionExpiredHandler, setConnectionChangeHandler, setConnectionRetryHandler, pingServer } from './api';
 import { ThemeProvider, useTheme } from './theme';
 import { fontSize, radius, spacing } from './theme';
-import type { ModelConfig, Project } from './types';
+import type { ModelConfig, Project, UserProfile } from './types';
 import { Icon } from './components/Icon';
 import { LoginScreen } from './screens/LoginScreen';
 import { HomeScreen } from './screens/HomeScreen';
@@ -32,6 +32,7 @@ function AppShell() {
   const [userRole, setUserRole] = useState<string>('user');
   const [username, setUsername] = useState('');
   const [serverReachable, setServerReachable] = useState<boolean | null>(null);
+  const [userProfile, setUserProfile] = useState<UserProfile | null>(null);
 
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const notify = useCallback((message: string, kind: 'success' | 'error' = 'success') => {
@@ -43,11 +44,12 @@ function AppShell() {
 
   const loadAll = useCallback(async () => {
     try {
-      const [projData, modelData] = await Promise.all([api.listProjects(), api.models()]);
+      const [projData, modelData, profile] = await Promise.all([api.listProjects(), api.models(), api.userProfile().catch(() => null)]);
       setProjects(projData.projects);
       setModels(modelData.models);
       setActiveModel(modelData.activeModel);
       setActiveVisionModel(modelData.activeVisionModel);
+      if (profile) setUserProfile(profile);
     } catch {
       notify('无法连接本地服务，请确认应用服务已启动。', 'error');
     } finally {
@@ -115,6 +117,7 @@ function AppShell() {
     await clearAuthToken();
     setAuthState('guest');
     setUserRole('user');
+    setUserProfile(null);
     setProjects([]);
     setModels([]);
   }, []);
@@ -166,6 +169,7 @@ function AppShell() {
           models={models}
           activeModel={activeModel}
           activeVisionModel={activeVisionModel}
+          userProfile={userProfile}
           onBack={() => { setView({ name: 'home' }); void refreshProjects(); }}
           notify={notify}
         />

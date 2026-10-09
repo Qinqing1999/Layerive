@@ -10,6 +10,7 @@ import {
   ScrollView,
   SectionList,
   StyleSheet,
+  Switch,
   Text,
   TextInput,
   View,
@@ -18,7 +19,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { api } from '../api';
 import { useTheme } from '../theme';
 import { fontSize, radius, spacing } from '../theme';
-import type { AdminSettings, AdminUser, ModelConfig } from '../types';
+import type { AdminSettings, AdminUser, ModelConfig, WatermarkConfig, QuotaConfig } from '../types';
 import { Icon } from '../components/Icon';
 
 type Props = {
@@ -31,11 +32,12 @@ type Props = {
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
 
-type AdminTab = 'models' | 'users' | 'settings';
+type AdminTab = 'models' | 'users' | 'settings' | 'ops';
 const TABS: { key: AdminTab; label: string }[] = [
   { key: 'models', label: '模型' },
   { key: 'users', label: '用户' },
   { key: 'settings', label: '设置' },
+  { key: 'ops', label: '运营' },
 ];
 
 const PROVIDERS: { value: ModelConfig['provider']; label: string }[] = [
@@ -113,6 +115,11 @@ export function ModelsScreen({ models, activeModel, activeVisionModel, currentUs
   const [settings, setSettings] = useState<AdminSettings | null>(null);
   const [settingsLoading, setSettingsLoading] = useState(false);
   const [savingSettings, setSavingSettings] = useState(false);
+  // 运营：水印 & 次数配置
+  const [wmConfig, setWmConfig] = useState<WatermarkConfig | null>(null);
+  const [quotaCfg, setQuotaCfg] = useState<QuotaConfig | null>(null);
+  const [savingWm, setSavingWm] = useState(false);
+  const [savingQuota, setSavingQuota] = useState(false);
 
   const imageModels = useMemo(() => models.filter((m) => m.type !== 'vision'), [models]);
   const visionModels = useMemo(() => models.filter((m) => m.type === 'vision'), [models]);
@@ -136,10 +143,14 @@ export function ModelsScreen({ models, activeModel, activeVisionModel, currentUs
     } finally { setSettingsLoading(false); }
   }
 
-  // 切到用户/设置分区时懒加载
+  // 切到用户/设置/运营分区时懒加载
   useEffect(() => {
     if (tab === 'users') loadUsers();
     if (tab === 'settings') loadSettings();
+    if (tab === 'ops' && !wmConfig) {
+      api.watermarkConfig().then(setWmConfig).catch(() => {});
+      api.quotaConfig().then(setQuotaCfg).catch(() => {});
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -204,6 +215,121 @@ export function ModelsScreen({ models, activeModel, activeVisionModel, currentUs
         },
       },
     ]);
+  }
+
+  // 设为 VIP 操作
+  function setUserVip(user: AdminUser) {
+    Alert.alert(
+      `设为 VIP - ${user.username}`,
+      '请选择 VIP 类型',
+      [
+        {
+          text: '永久 VIP',
+          onPress: async () => {
+            setBusy(true);
+            try {
+              await api.setUserVip(user.username, 'permanent');
+              await loadUsers();
+              notify('已设为永久 VIP');
+            } catch (e) { notify((e as Error).message, 'error'); }
+            finally { setBusy(false); }
+          },
+        },
+        {
+          text: '取消 VIP',
+          style: 'destructive',
+          onPress: async () => {
+            setBusy(true);
+            try {
+              await api.setUserVip(user.username, null);
+              await loadUsers();
+              notify('已取消 VIP');
+            } catch (e) { notify((e as Error).message, 'error'); }
+            finally { setBusy(false); }
+          },
+        },
+        { text: '返回', style: 'cancel' },
+      ],
+    );
+  }
+
+  // 调整次数操作
+  function adjustUserQuota(user: AdminUser) {
+    Alert.alert(
+      `调整次数 - ${user.username}`,
+      '请选择要调整的次数类型',
+      [
+        {
+          text: '每日免费次数',
+          onPress: () => {
+            Alert.prompt('每日免费次数', `当前：${user.watermarkQuota?.dailyFree ?? 0}\n输入新的每日免费次数`, [
+              { text: '取消', style: 'cancel' },
+              {
+                text: '确定',
+                onPress: async (val) => {
+                  const n = Number(val);
+                  if (!Number.isFinite(n) || n < 0) { notify('请输入有效的非负数字', 'error'); return; }
+                  setBusy(true);
+                  try {
+                    await api.adjustUserQuota(user.username, n, undefined);
+                    await loadUsers();
+                    notify('每日免费次数已更新');
+                  } catch (e) { notify((e as Error).message, 'error'); }
+                  finally { setBusy(false); }
+                },
+              },
+            ]);
+          },
+        },
+        {
+          text: '额外赠送次数',
+          onPress: () => {
+            Alert.prompt('额外赠送次数', `当前：${user.watermarkQuota?.bonusCredits ?? 0}\n输入额外赠送次数`, [
+              { text: '取消', style: 'cancel' },
+              {
+                text: '确定',
+                onPress: async (val) => {
+                  const n = Number(val);
+                  if (!Number.isFinite(n) || n < 0) { notify('请输入有效的非负数字', 'error'); return; }
+                  setBusy(true);
+                  try {
+                    await api.adjustUserQuota(user.username, undefined, n);
+                    await loadUsers();
+                    notify('额外赠送次数已更新');
+                  } catch (e) { notify((e as Error).message, 'error'); }
+                  finally { setBusy(false); }
+                },
+              },
+            ]);
+          },
+        },
+        { text: '返回', style: 'cancel' },
+      ],
+    );
+  }
+
+  // 保存水印配置
+  async function saveWatermarkConfig(cfg: WatermarkConfig) {
+    setSavingWm(true);
+    try {
+      const saved = await api.updateWatermarkConfig(cfg);
+      setWmConfig(saved);
+      notify('水印配置已保存');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally { setSavingWm(false); }
+  }
+
+  // 保存次数配置
+  async function saveQuotaConfig(cfg: QuotaConfig) {
+    setSavingQuota(true);
+    try {
+      const saved = await api.updateQuotaConfig(cfg);
+      setQuotaCfg(saved);
+      notify('次数配置已保存');
+    } catch (e) {
+      notify((e as Error).message, 'error');
+    } finally { setSavingQuota(false); }
   }
 
   async function saveSettings(concurrency: number) {
@@ -338,6 +464,14 @@ export function ModelsScreen({ models, activeModel, activeVisionModel, currentUs
 
   const renderUser = (user: AdminUser) => {
     const isSelf = user.username === currentUsername;
+    // 计算今日剩余次数：dailyFree - dailyUsed + bonusCredits + adCredits
+    const q = user.watermarkQuota;
+    const remaining = q ? Math.max(0, (q.dailyFree - q.dailyUsed) + q.bonusCredits + q.adCredits) : 0;
+    const vipBadge = user.vipType === 'permanent'
+      ? 'VIP永久'
+      : user.vipType === 'subscription' && user.vipExpiresAt
+        ? `VIP至 ${user.vipExpiresAt}`
+        : null;
     return (
       <View key={user.username} style={styles.card}>
         <View style={styles.cardMain}>
@@ -347,15 +481,33 @@ export function ModelsScreen({ models, activeModel, activeVisionModel, currentUs
           <View style={styles.cardBody}>
             <View style={styles.cardHead}>
               <Text style={styles.cardTitle} numberOfLines={1}>{user.username}</Text>
+              {vipBadge ? (
+                <View style={styles.vipBadge}>
+                  <Text style={styles.vipBadgeText}>{vipBadge}</Text>
+                </View>
+              ) : null}
               {isSelf ? <View style={styles.activeTag}><Text style={styles.activeTagText}>我</Text></View> : null}
             </View>
-            <Text style={styles.cardSub}>{user.role === 'admin' ? '管理员' : '普通用户'}</Text>
+            <Text style={styles.cardSub}>
+              {user.role === 'admin' ? '管理员' : '普通用户'}
+              {' · 今日剩余 '}
+              {remaining}
+              {' 次'}
+            </Text>
           </View>
         </View>
         <View style={styles.cardActions}>
           <Pressable style={styles.cardActionBtn} onPress={() => setUserForm({ mode: 'reset', target: user })} disabled={busy}>
             <Icon name="data" size={14} color={colors.muted} />
             <Text style={styles.cardActionText}>改密</Text>
+          </Pressable>
+          <Pressable style={styles.cardActionBtn} onPress={() => setUserVip(user)} disabled={busy}>
+            <Icon name="check" size={14} color={colors.accent} />
+            <Text style={styles.cardActionText}>设为VIP</Text>
+          </Pressable>
+          <Pressable style={styles.cardActionBtn} onPress={() => adjustUserQuota(user)} disabled={busy}>
+            <Icon name="data" size={14} color={colors.muted} />
+            <Text style={styles.cardActionText}>调整次数</Text>
           </Pressable>
           {!isSelf && (
             <>
@@ -469,6 +621,156 @@ export function ModelsScreen({ models, activeModel, activeVisionModel, currentUs
                 </Pressable>
               </View>
               <Text style={styles.cardSub}>同时处理的生成任务上限（1-16）。调大可加快批量速度，但会增加模型服务压力。</Text>
+            </View>
+          ) : (
+            <View style={styles.empty}>
+              <ActivityIndicator size="small" color={colors.accent} />
+            </View>
+          )}
+        </ScrollView>
+      )}
+
+      {tab === 'ops' && (
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={[styles.list, { paddingBottom: (insets.bottom || 0) + spacing.xxl }]}
+        >
+          {/* 水印配置区 */}
+          <Text style={[styles.groupTitle, { marginBottom: spacing.sm }]}>水印配置</Text>
+          {wmConfig ? (
+            <View style={styles.card}>
+              <View style={styles.opsRow}>
+                <Text style={styles.opsLabel}>水印开关</Text>
+                <Switch
+                  value={wmConfig.enabled}
+                  onValueChange={(v) => setWmConfig({ ...wmConfig, enabled: v })}
+                  trackColor={{ false: colors.border, true: colors.accent }}
+                />
+              </View>
+
+              <Text style={styles.fieldLabel}>水印文字</Text>
+              <TextInput
+                style={styles.input}
+                value={wmConfig.text}
+                onChangeText={(v) => setWmConfig({ ...wmConfig, text: v })}
+                placeholder="例如：© Layerive"
+                placeholderTextColor={colors.muted}
+              />
+
+              <Text style={styles.fieldLabel}>字号</Text>
+              <TextInput
+                style={styles.input}
+                value={String(wmConfig.fontSize)}
+                onChangeText={(v) => setWmConfig({ ...wmConfig, fontSize: Number(v.replace(/[^0-9]/g, '')) || 0 })}
+                keyboardType="number-pad"
+              />
+
+              <Text style={styles.fieldLabel}>透明度（0-1）</Text>
+              <TextInput
+                style={styles.input}
+                value={String(wmConfig.opacity)}
+                onChangeText={(v) => {
+                  const n = Number(v);
+                  if (Number.isFinite(n)) setWmConfig({ ...wmConfig, opacity: Math.max(0, Math.min(1, n)) });
+                }}
+                keyboardType="decimal-pad"
+              />
+
+              <Text style={styles.fieldLabel}>旋转角度</Text>
+              <TextInput
+                style={styles.input}
+                value={String(wmConfig.rotation)}
+                onChangeText={(v) => setWmConfig({ ...wmConfig, rotation: Number(v.replace(/[^0-9-]/g, '')) || 0 })}
+                keyboardType="number-pad"
+              />
+
+              <Text style={styles.fieldLabel}>间距</Text>
+              <TextInput
+                style={styles.input}
+                value={String(wmConfig.spacing)}
+                onChangeText={(v) => setWmConfig({ ...wmConfig, spacing: Number(v.replace(/[^0-9]/g, '')) || 0 })}
+                keyboardType="number-pad"
+              />
+
+              <Text style={styles.fieldLabel}>颜色（hex）</Text>
+              <TextInput
+                style={styles.input}
+                value={wmConfig.color}
+                onChangeText={(v) => setWmConfig({ ...wmConfig, color: v })}
+                placeholder="#000000"
+                placeholderTextColor={colors.muted}
+                autoCapitalize="none"
+              />
+
+              {/* 实时预览 */}
+              <Text style={styles.fieldLabel}>预览</Text>
+              <View style={[styles.wmPreview, { backgroundColor: colors.input }]}>
+                {wmConfig.enabled ? (
+                  <Text
+                    style={{
+                      fontSize: wmConfig.fontSize,
+                      color: wmConfig.color,
+                      opacity: wmConfig.opacity,
+                      transform: [{ rotate: `${wmConfig.rotation}deg` }],
+                    }}
+                  >
+                    {wmConfig.text || '水印预览'}
+                  </Text>
+                ) : (
+                  <Text style={styles.cardSub}>水印已关闭</Text>
+                )}
+              </View>
+
+              <Pressable style={[styles.saveBtn, savingWm && { opacity: 0.5 }]} onPress={() => saveWatermarkConfig(wmConfig)} disabled={savingWm}>
+                {savingWm ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.saveBtnText}>保存水印配置</Text>}
+              </Pressable>
+            </View>
+          ) : (
+            <View style={styles.empty}>
+              <ActivityIndicator size="small" color={colors.accent} />
+            </View>
+          )}
+
+          {/* 次数配置区 */}
+          <Text style={[styles.groupTitle, { marginTop: spacing.lg, marginBottom: spacing.sm }]}>次数配置</Text>
+          {quotaCfg ? (
+            <View style={styles.card}>
+              <Text style={styles.fieldLabel}>每日免费次数</Text>
+              <TextInput
+                style={styles.input}
+                value={String(quotaCfg.defaultDailyFree)}
+                onChangeText={(v) => setQuotaCfg({ ...quotaCfg, defaultDailyFree: Number(v.replace(/[^0-9]/g, '')) || 0 })}
+                keyboardType="number-pad"
+              />
+
+              <Text style={styles.fieldLabel}>广告获得次数</Text>
+              <TextInput
+                style={styles.input}
+                value={String(quotaCfg.defaultAdCredits)}
+                onChangeText={(v) => setQuotaCfg({ ...quotaCfg, defaultAdCredits: Number(v.replace(/[^0-9]/g, '')) || 0 })}
+                keyboardType="number-pad"
+              />
+
+              <Text style={styles.fieldLabel}>VIP 每日上限（0=无限）</Text>
+              <TextInput
+                style={styles.input}
+                value={String(quotaCfg.vipDailyLimit)}
+                onChangeText={(v) => setQuotaCfg({ ...quotaCfg, vipDailyLimit: Number(v.replace(/[^0-9]/g, '')) || 0 })}
+                keyboardType="number-pad"
+              />
+
+              <View style={styles.opsRow}>
+                <Text style={styles.opsLabel}>广告开关</Text>
+                <Switch
+                  value={quotaCfg.adEnabled}
+                  onValueChange={(v) => setQuotaCfg({ ...quotaCfg, adEnabled: v })}
+                  trackColor={{ false: colors.border, true: colors.accent }}
+                />
+              </View>
+
+              <Pressable style={[styles.saveBtn, savingQuota && { opacity: 0.5 }]} onPress={() => saveQuotaConfig(quotaCfg)} disabled={savingQuota}>
+                {savingQuota ? <ActivityIndicator size="small" color="#fff" /> : <Text style={styles.saveBtnText}>保存次数配置</Text>}
+              </Pressable>
             </View>
           ) : (
             <View style={styles.empty}>
@@ -841,4 +1143,10 @@ const makeStyles = (c: ReturnType<typeof useTheme>['colors']) =>
     cancelBtnText: { color: c.muted, fontSize: fontSize.md, fontWeight: '600' },
     saveBtn: { flex: 1, height: 44, borderRadius: radius.sm, backgroundColor: c.accent, alignItems: 'center', justifyContent: 'center' },
     saveBtnText: { color: '#fff', fontSize: fontSize.md, fontWeight: '700' },
+    // VIP 徽章 & 运营 Tab 样式
+    vipBadge: { backgroundColor: '#FFD700', borderRadius: radius.sm, paddingHorizontal: 6, paddingVertical: 1 },
+    vipBadgeText: { color: '#8B6914', fontSize: 10, fontWeight: '700' },
+    opsRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: spacing.xs },
+    opsLabel: { fontSize: fontSize.md, fontWeight: '600', color: c.text },
+    wmPreview: { borderWidth: 1, borderColor: c.border, borderRadius: radius.sm, height: 80, alignItems: 'center', justifyContent: 'center', marginBottom: spacing.sm },
   });

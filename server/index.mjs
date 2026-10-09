@@ -8,7 +8,7 @@ import path from 'node:path';
 import { APP_ROOT, CONFIG_ROOT, DATA_ROOT, db, closeDatabase, ensureProjectDirs, GALLERY_ROOT, imageDto, now, parseJson, PROJECTS_ROOT, projectDto, uid } from './db.mjs';
 import { makeDemoPng, makeThumbnailPng, readImageDimensions } from './png.mjs';
 import { isSenseNovaLegacyVisionEndpoint, isSenseNovaTokenChatEndpoint, normalizeBaseUrl, pickApiKey, publicModel, readModels, removeModel, upsertModel, visionApiFormat, visionEndpoint, writeModels } from './models.mjs';
-import { createUser, deleteUser, hasDefaultAdminCredentials, listUsersPublic, updateUser, verifyLogin } from './users.mjs';
+import { adjustUserQuota, checkAndResetDailyQuota, consumeQuota, createUser, deleteUser, getRemainingQuota, getUserProfile, hasDefaultAdminCredentials, isVip, listUsersPublic, readUsers, setUserVip, updateUser, verifyLogin, watchAd, writeUsers } from './users.mjs';
 import { createZip, readZip } from './zip.mjs';
 import { composeLocalReference, normalizeLocalImage, normalizeSenseNovaInput, preserveOutsideRegion, referenceBytes, validatePlacement, validateRect } from './local-edit.mjs';
 
@@ -142,17 +142,43 @@ let idleRequestResolvers = [];
 // ---- Server settings (management page) ----
 const SETTINGS_PATH = path.join(DATA_ROOT, 'settings.json');
 const clampConcurrency = (value) => Math.min(8, Math.max(1, Math.trunc(Number(value) || 2)));
+const DEFAULT_WATERMARK = { enabled: true, text: 'Layerive', fontSize: 24, opacity: 0.15, rotation: -30, spacing: 200, color: '#888888' };
+const DEFAULT_QUOTA = { defaultDailyFree: 3, defaultAdCredits: 1, vipDailyLimit: 0, adEnabled: false };
+
 function readSettings() {
+  const fallback = { queueConcurrency: 2, watermark: { ...DEFAULT_WATERMARK }, quota: { ...DEFAULT_QUOTA } };
   try {
-    const settings = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'));
-    return { queueConcurrency: clampConcurrency(settings?.queueConcurrency) };
+    const raw = JSON.parse(readFileSync(SETTINGS_PATH, 'utf8'));
+    return {
+      queueConcurrency: clampConcurrency(raw?.queueConcurrency),
+      watermark: {
+        enabled: raw?.watermark?.enabled !== undefined ? Boolean(raw.watermark.enabled) : DEFAULT_WATERMARK.enabled,
+        text: String(raw?.watermark?.text || DEFAULT_WATERMARK.text).slice(0, 50),
+        fontSize: Math.min(72, Math.max(8, Number(raw?.watermark?.fontSize) || DEFAULT_WATERMARK.fontSize)),
+        opacity: Math.min(1, Math.max(0, Number(raw?.watermark?.opacity) || DEFAULT_WATERMARK.opacity)),
+        rotation: Number(raw?.watermark?.rotation ?? DEFAULT_WATERMARK.rotation),
+        spacing: Math.min(500, Math.max(50, Number(raw?.watermark?.spacing) || DEFAULT_WATERMARK.spacing)),
+        color: String(raw?.watermark?.color || DEFAULT_WATERMARK.color),
+      },
+      quota: {
+        defaultDailyFree: Math.min(100, Math.max(0, Number(raw?.quota?.defaultDailyFree) || DEFAULT_QUOTA.defaultDailyFree)),
+        defaultAdCredits: Math.min(10, Math.max(1, Number(raw?.quota?.defaultAdCredits) || DEFAULT_QUOTA.defaultAdCredits)),
+        vipDailyLimit: Math.min(1000, Math.max(0, Number(raw?.quota?.vipDailyLimit) || DEFAULT_QUOTA.vipDailyLimit)),
+        adEnabled: Boolean(raw?.quota?.adEnabled),
+      },
+    };
   } catch { /* missing or malformed file falls back to the default */ }
-  return { queueConcurrency: 2 };
+  return fallback;
 }
+
 async function writeSettings(input) {
   const concurrency = Number(input?.queueConcurrency);
   if (!Number.isFinite(concurrency)) throw Object.assign(new Error('队列并发数必须是 1–8 的整数'), { status: 400 });
-  const settings = { queueConcurrency: clampConcurrency(concurrency) };
+  const settings = {
+    queueConcurrency: clampConcurrency(concurrency),
+    watermark: input?.watermark || readSettings().watermark,
+    quota: input?.quota || readSettings().quota,
+  };
   await writeFile(SETTINGS_PATH, `${JSON.stringify(settings, null, 2)}\n`, 'utf-8').catch(() => {});
   return settings;
 }
@@ -2824,6 +2850,101 @@ const server = http.createServer(async (req, res) => {
       const user = deleteUser(username);
       revokeUserSessions(username);
       return json(res, 200, { ok: true, user });
+    }
+
+    // ---- VIP / 水印 / 配额：管理侧路由（admin only） ----
+    // PUT /api/admin/users/:username/vip — 设置/取消 VIP
+    const adminVipMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/vip$/);
+    if (adminVipMatch && req.method === 'PUT') {
+      const username = decodeURIComponent(adminVipMatch[1]);
+      const input = await body(req);
+      const result = setUserVip(username, input?.vipType, input?.vipExpiresAt);
+      return json(res, 200, result);
+    }
+    // PUT /api/admin/users/:username/quota — 手动调配次数
+    const adminQuotaMatch = pathname.match(/^\/api\/admin\/users\/([^/]+)\/quota$/);
+    if (adminQuotaMatch && req.method === 'PUT') {
+      const username = decodeURIComponent(adminQuotaMatch[1]);
+      const input = await body(req);
+      const result = adjustUserQuota(username, input?.dailyFree, input?.bonusCredits);
+      return json(res, 200, result);
+    }
+    // GET/PUT /api/admin/watermark — 水印配置
+    if (pathname === '/api/admin/watermark' && req.method === 'GET') {
+      const settings = readSettings();
+      return json(res, 200, settings.watermark);
+    }
+    if (pathname === '/api/admin/watermark' && req.method === 'PUT') {
+      const input = await body(req);
+      const settings = readSettings();
+      const watermark = {
+        enabled: input?.enabled !== false,
+        text: String(input?.text || 'Layerive').slice(0, 50),
+        fontSize: Math.min(72, Math.max(8, Number(input?.fontSize) || 24)),
+        opacity: Math.min(1, Math.max(0, Number(input?.opacity) || 0.15)),
+        rotation: Number(input?.rotation ?? -30),
+        spacing: Math.min(500, Math.max(50, Number(input?.spacing) || 200)),
+        color: String(input?.color || '#888888'),
+      };
+      settings.watermark = watermark;
+      await writeSettings(settings);
+      return json(res, 200, watermark);
+    }
+    // GET/PUT /api/admin/quota-config — 全局次数配置
+    if (pathname === '/api/admin/quota-config' && req.method === 'GET') {
+      const settings = readSettings();
+      return json(res, 200, settings.quota);
+    }
+    if (pathname === '/api/admin/quota-config' && req.method === 'PUT') {
+      const input = await body(req);
+      const settings = readSettings();
+      settings.quota = {
+        defaultDailyFree: Math.min(100, Math.max(0, Number(input?.defaultDailyFree) || 3)),
+        defaultAdCredits: Math.min(10, Math.max(1, Number(input?.defaultAdCredits) || 1)),
+        vipDailyLimit: Math.min(1000, Math.max(0, Number(input?.vipDailyLimit) || 0)),
+        adEnabled: Boolean(input?.adEnabled),
+      };
+      await writeSettings(settings);
+      return json(res, 200, settings.quota);
+    }
+
+    // ---- VIP / 水印 / 配额：用户侧路由（登录即可访问） ----
+    // GET /api/user/profile — 当前用户 VIP 状态 + 剩余次数 + 水印配置
+    if (pathname === '/api/user/profile' && req.method === 'GET') {
+      const session = requireAuth(req);
+      const settings = readSettings();
+      const profile = getUserProfile(session.username, settings);
+      return json(res, 200, profile);
+    }
+    // POST /api/user/watermark-save — 消耗1次免水印机会，返回原图下载URL
+    if (pathname === '/api/user/watermark-save' && req.method === 'POST') {
+      const session = requireAuth(req);
+      const input = await body(req);
+      const versionId = String(input?.imageVersionId || '').trim();
+      if (!versionId) throw Object.assign(new Error('缺少 imageVersionId'), { status: 400 });
+      // 查 image_versions 表
+      const version = db.prepare('SELECT * FROM image_versions WHERE id = ?').get(versionId);
+      if (!version) throw Object.assign(new Error('版本不存在'), { status: 404 });
+      // 查 selected_image_id 对应的 images 记录获取 file_path
+      const image = version.selected_image_id ? db.prepare('SELECT * FROM images WHERE id = ?').get(version.selected_image_id) : null;
+      if (!image) throw Object.assign(new Error('图片不存在'), { status: 404 });
+      // 消耗配额
+      const settings = readSettings();
+      const users = readUsers();
+      const user = users.find((u) => u.username === session.username);
+      if (!user) throw Object.assign(new Error('用户不存在'), { status: 404 });
+      checkAndResetDailyQuota(user);
+      if (!consumeQuota(user, settings)) throw Object.assign(new Error('今日免水印次数已用完'), { status: 403 });
+      writeUsers(users);
+      const remaining = getRemainingQuota(user, settings);
+      return json(res, 200, { downloadUrl: `/files/${image.file_path}`, remainingQuota: remaining });
+    }
+    // POST /api/user/watch-ad — 观看广告获得次数
+    if (pathname === '/api/user/watch-ad' && req.method === 'POST') {
+      const session = requireAuth(req);
+      const settings = readSettings();
+      const result = watchAd(session.username, settings);
+      return json(res, 200, result);
     }
 
     if (requestToken) activeServiceRequests.add(requestToken);
