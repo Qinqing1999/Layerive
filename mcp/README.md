@@ -40,6 +40,7 @@ node server.mjs      # stdio 传输
 | `list_images` | 列出单个项目内的图片，用于挑 `input_image_id` |
 | `size_options` | 可选尺寸、比例 token 与 `original` 的含义 |
 | `list_plugins` | 列出图片操作插件与每个插件对模型能力的要求 |
+| `crop_image` | 裁剪：按百分比 `rect` 只保留选区内的原始像素，纯本地、不调模型 |
 | `outpaint_image` | 扩图：把画布扩到目标尺寸，原内容保留，新增区域自然延展 |
 | `enhance_image` | 高清增强：提升清晰度与细节，保持主体、文字、构图不变 |
 | `remove_watermark` | 去水印：视觉模型先定位水印再覆盖式移除 |
@@ -89,6 +90,7 @@ node server.mjs      # stdio 传输
 - 一次调用会等到任务结束（默认 300 秒，`timeout_seconds` 可调），返回版本号与输出图片地址；超时则给出任务 id，用 `task_status` 接着查。
 - 矩形一律用图片百分比：`{x, y, width, height}`，取值 0–100，左上角为原点。
 - 改字是两步：先 `recognize_text` 拿到分段，再 `edit_text` 只传要改的那几段（`original_text` + 新的 `text`），没变的段可以省略。
+- `crop_image` 是纯本地 Sharp 裁剪：只保留 `rect` 内的原始像素，不缩放、不重绘、不调用任何模型，也不需要模型具备编辑能力；输出就是选区的实际像素尺寸（可能小于 256px）。
 - `extract_asset` 只需要 `rect`，裁剪与补边由 MCP 自己做（比例过于细长时会拉伸补边，避免平台比例校验失败）。
 - `remove_background` 走三档策略：`auto`（默认，先本地抠、失败再让图片模型重画）、`local`（只用本地抠图，失败直接报错、不花额度）、`ai`（只用图片模型）。本地抠图由 `LAYERIVE_CUTOUT_URL` 指向的分割服务完成，保持原图尺寸与主体位置；图片里有多个主体时用 `rect` 指定只抠哪一个。本地路径不依赖模型的透明能力，所以当前模型也能用；只有 `ai` 策略才需要模型声明 `transparentBackground` 并支持 PNG。
 - 输出尺寸默认跟着**源图比例**走：MCP 会挑模型声明里最接近源图长宽比的那个尺寸再提交，和网页下拉一致。不这么做的话服务端会退回模型默认画布，把 16:9 的图输出成方形。

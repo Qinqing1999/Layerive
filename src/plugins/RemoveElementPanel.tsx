@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { Icon } from '../Icon';
 import { useLanguage } from '../i18n';
-import type { CleanupMode, ModelConfig } from '../types';
+import type { CleanupMode, GenerationTask, ModelConfig } from '../types';
 import { cleanupDescriptionKeys, cleanupIcons, cleanupModeKeys, removeElementStageKey } from './definitions';
 import type { TaskKind } from './types';
 
@@ -13,7 +13,7 @@ export type RemoveElementPanelProps = {
   selectCleanupMode: (mode: CleanupMode) => void;
   cleanupKeepPoints: { x: number; y: number; }[];
   setCleanupKeepPoints: Dispatch<SetStateAction<{ x: number; y: number; }[]>>;
-  activeTask: { id: string | null; kind: TaskKind; stage?: "planning" | "compositing" | "generating" | "preserving" | "validating" | null | undefined; } | null;
+  activeTask: { id: string | null; kind: TaskKind; stage?: GenerationTask['stage'] } | null;
   cancelActiveTask: () => Promise<void>;
   selectedModel: ModelConfig | undefined;
   visionModels: ModelConfig[];

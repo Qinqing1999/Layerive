@@ -110,6 +110,8 @@ export const api = {
     request<BatchEditResult>(`/api/projects/${id}/local-edit-batch`, { method: 'POST', body: JSON.stringify(input) }),
   outpaint: (id: string, input: { imageId: string; modelId: string; parentVersionId?: string | null; size: string; params?: Record<string, unknown> }) =>
     runImagePlugin(id, imagePluginForOperation('outpaint').id, input),
+  crop: (id: string, input: { imageId: string; modelId: string; parentVersionId?: string | null; rect: { x: number; y: number; width: number; height: number } }) =>
+    runImagePlugin(id, imagePluginForOperation('crop_image').id, input),
   enhance: (id: string, input: { imageId: string; modelId: string; parentVersionId?: string | null; params?: Record<string, unknown> }) =>
     runImagePlugin(id, imagePluginForOperation('enhance').id, input),
   removeWatermark: (id: string, input: { imageId: string; modelId: string; visionModelId?: string; parentVersionId?: string | null; params?: Record<string, unknown> }) =>

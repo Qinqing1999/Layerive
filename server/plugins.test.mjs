@@ -42,7 +42,7 @@ test('registration rejects collisions, incompatible APIs and invalid hooks; cata
     assert.throws(() => createPluginRegistry([{ ...extension, ...patch }]), /Invalid/);
   }
   const entries = imagePlugins.list();
-  assert.equal(entries.filter(plugin => plugin.kind !== 'recipe').length, 9);
+  assert.equal(entries.filter(plugin => plugin.kind !== 'recipe').length, 10);
   entries[0].requirements.image.push('broken');
   assert.deepEqual(imagePlugins.list()[0].requirements.image, ['edit_prompt']);
   assert.throws(() => imagePlugins.get(entries[0].id).requirements.image.push('broken'));

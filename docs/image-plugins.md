@@ -2,7 +2,7 @@
 
 最后核对：2026-10-29。
 
-第二阶段已将全部九项专项图片操作迁移为随应用一起发布的内置插件：局部修改、删除元素、素材提取、融合、去除背景、去水印、变清晰、扩图和文字编辑。局部批量修改复用局部修改插件的规划与结果处理。功能入口、场景、模型协议、编辑约束和历史操作类型保持兼容。
+第二阶段已将全部九项专项图片操作迁移为随应用一起发布的内置插件：局部修改、删除元素、素材提取、融合、去除背景、去水印、变清晰、扩图和文字编辑。第四阶段补上第十项代码插件「裁剪」（`layerive.crop`）：它没有任何模型能力要求，`prepare()` 直接用 Sharp 裁下框选区域并以 `local.bytes` 交付成品，因此完全不经过图片模型与视觉模型，也不消耗生成额度。局部批量修改复用局部修改插件的规划与结果处理。功能入口、场景、模型协议、编辑约束和历史操作类型保持兼容。
 
 本阶段没有外部 JavaScript 安装器、热加载、市场或权限沙箱。文生图、普通提示词改图、通用批量调度与首次文字识别/缓存查询仍是宿主基础能力。
 
@@ -33,7 +33,7 @@
 
 流程固定为输入/模型能力校验 → 原图与可选参考图规范化 → 可选视觉规划 → 原图片适配器 → Sharp 输出校验/转码 → 原版本事务。图片按原图、字段顺序参考图排列；视觉规划拒绝或不合法时不调用图片模型。source 尺寸规则要求结果宽高等于规范化原图，尺寸不符直接失败，不自动拉伸；transparent=true 同时验证足量透明像素与可见像素；false 拒绝任何 Alpha <250 的明显透明像素，避免把空透明图或异常透明背景作为上色成功结果。当前校验不判断图片语义质量。
 
-`GET /api/plugins` 为声明式条目额外返回 `kind: recipe` 与 `ui`（无 workflow 提示词）。新增 `errors` 数组报告启动时被跳过的目录；无效 JSON、字段、重复 ID/operation/route 被隔离，不阻断原有插件。根目录缺失/不可读同样记录 errors，保留九项代码插件可用。只读取固定资源目录中的普通子目录及 ≤64KB 的普通 plugin.json，拒绝符号链接，不动态导入 JS。目录变更需重启；界面的重试按钮仅重新获取当前服务清单。
+`GET /api/plugins` 为声明式条目额外返回 `kind: recipe` 与 `ui`（无 workflow 提示词）。新增 `errors` 数组报告启动时被跳过的目录；无效 JSON、字段、重复 ID/operation/route 被隔离，不阻断原有插件。根目录缺失/不可读同样记录 errors，保留十项代码插件可用。只读取固定资源目录中的普通子目录及 ≤64KB 的普通 plugin.json，拒绝符号链接，不动态导入 JS。目录变更需重启；界面的重试按钮仅重新获取当前服务清单。
 
 `POST /api/projects/:id/plugins/:pluginId/run` 参数为 `{ imageId, modelId, visionModelId?, fields, params?, parentVersionId? }`。未知字段、类型/长度/范围错误、跨项目参考图与不支持的模型输出规则会在调用模型前拒绝。运行期使用 `plugin.notApplicable`、`plugin.invalidPlan`、`plugin.invalidOutput` 稳定错误码。
 
@@ -53,10 +53,11 @@
 | server/plugins/host.mjs | 项目/任务范围内的服务接口；凭据留在宿主模型快照中 |
 | server/plugins/{local-edit,remove-element,extract-asset,fusion}.mjs | 操作输入校验、规划与结果要求 |
 | server/plugins/{edit-text,remove-background,remove-watermark,outpaint,enhance}.mjs | 文字规划与输出快照、透明主体校验、水印规划、扩图及清晰度提示词 |
+| server/plugins/crop.mjs | 纯本地裁剪：校验百分比矩形、`autoOrient()` 后按已定向画幅换算像素、`extract()` 出 PNG，`local.bytes` 直接交付，不调用任何模型 |
 | server/plugins/preserve-output.mjs | 请求宿主执行单区或多区像素保护的共用后处理 |
 | server/index.mjs | HTTP、材料文件、模型适配/重试、任务生命周期、SQLite 事务和版本发布 |
 | src/plugins/catalog.ts、registry.ts | 清单读取、工作台面板/按钮定义、历史任务类型映射 |
-| src/plugins/*Panel.tsx | 六个独立面板（含扩图与文字编辑）；无面板的三项操作只注册按钮；复用原 DOM、样式、国际化和交互回调 |
+| src/plugins/*Panel.tsx | 七个独立面板（含扩图、裁剪与文字编辑）；无面板的三项操作只注册按钮；复用原 DOM、样式、国际化和交互回调 |
 | src/plugins/RecipeCatalog.tsx、RecipeTools.tsx、RecipeDialog.tsx、PluginOperationName.tsx | API 清单、动态入口、通用表单与本地化操作名称 |
 | src/WorkspaceView.tsx | 共享画布、框选/粘贴、互斥操作状态、草稿、任务轮询与版本展示 |
 
@@ -95,7 +96,7 @@ multipleImages 是插件需求说明，不表示用户配置的兼容服务已�
 
 `outputMetadata.textRecognition` 是目前唯一支持的输出元数据，使用 `host.textRecognitionSnapshot(model, segments)` 构造。包含模型 ID、配置指纹、名称和规范化文字分段；成功事务为每张输出写入识别缓存（包括空快照）。插件不访问数据库，不提供任意 SQL 或事务回调；失败/取消不写输出缓存。增加其他元数据种类时，需先扩展宿主的存储契约。
 
-去背景的 Alpha 校验已由插件 `processOutput` 执行；强制单图、PNG、透明参数与主体/透明像素占比校验保持原规则。扩图、变清晰和删除元素的全图文字清理不调用视觉模型。九项插件任务统一使用 300 秒总预算；普通生成仍沿用按图片数量计算的超时。
+去背景的 Alpha 校验已由插件 `processOutput` 执行；强制单图、PNG、透明参数与主体/透明像素占比校验保持原规则。扩图、变清晰和删除元素的全图文字清理不调用视觉模型。十项插件任务统一使用插件声明的超时预算（裁剪 60 秒，其余 300 秒）；普通生成仍沿用按图片数量计算的超时。
 
 ## 宿主接口
 
@@ -129,7 +130,7 @@ server/plugins.test.mjs 的 example.product-photo 展示了一个未在主执行
 
 ## 数据与旧接口兼容
 
-- 九项原专项路由均映射到同一插件入口；局部批量路由不变。`/generate` 若明确传入已注册专项 operation，也转入插件校验，避免绕过去背景等输出规则；普通 auto/text_to_image/edit_prompt 行为不变。
+- 十项原专项路由（含 `/crop`）均映射到同一插件入口；局部批量路由不变。`/generate` 若明确传入已注册专项 operation，也转入插件校验，避免绕过去背景等输出规则；普通 auto/text_to_image/edit_prompt 行为不变。
 - 新 GET /api/plugins 返回公开元数据；POST /api/projects/:id/plugins/:pluginId/run 返回原 GenerateResult。
 - 新任务在 generation_tasks.input_json.plugin 保存 { id, version, apiVersion }；任务查询附带可空 plugin。旧任务缺少该字段时仍可读取。
 - 原 operation_type、阶段、错误码、参数和 localEdit / fusion / extraction JSON 结构保留；SQLite 没有新增表或列。
@@ -141,7 +142,7 @@ server/plugins.test.mjs 的 example.product-photo 展示了一个未在主执行
 
 ## 验证
 
-运行 npm run lint、npm run build、npm test。原有回归覆盖服务端基线；plugins.test.mjs 验证扩展契约、取消、能力与凭据边界，plugin-api.test.mjs 验证九项原操作与上色插件的通用/别名入口等价、未知插件拒绝、访问限制与复制/导入，以及改字/去水印/去背景规划取消、拒绝不出图、失败不发布版本与同步输入校验。generation.test.mjs 继续覆盖文字快照多候选/全部删除和透明结果拒绝。
+运行 npm run lint、npm run build、npm test。原有回归覆盖服务端基线；plugins.test.mjs 验证扩展契约、取消、能力与凭据边界，plugin-api.test.mjs 验证十项原操作与上色插件的通用/别名入口等价、未知插件拒绝、访问限制与复制/导入，以及改字/去水印/去背景规划取消、拒绝不出图、失败不发布版本与同步输入校验。generation.test.mjs 继续覆盖文字快照多候选/全部删除和透明结果拒绝。
 
 测试只使用本地生成的图片及 work/*-test-* 隔离目录，不读取用户数据库或调用真实模型。模拟服务回归确认软件行为兼容，不能代替实际模型的生成质量评估。
 

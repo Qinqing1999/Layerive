@@ -1,7 +1,7 @@
 import type { Dispatch, SetStateAction } from 'react';
 import { Icon } from '../Icon';
 import { useLanguage } from '../i18n';
-import type { ExtractionMode, ModelConfig } from '../types';
+import type { ExtractionMode, GenerationTask, ModelConfig } from '../types';
 import { extractionDescriptionKeys, extractionIcons, extractionModeKeys } from './definitions';
 import type { TaskKind } from './types';
 
@@ -11,7 +11,7 @@ export type ExtractAssetPanelProps = {
   generating: boolean;
   extractSubmitting: boolean;
   setExtractionType: Dispatch<SetStateAction<ExtractionMode>>;
-  activeTask: { id: string | null; kind: TaskKind; stage?: "planning" | "compositing" | "generating" | "preserving" | "validating" | null | undefined; } | null;
+  activeTask: { id: string | null; kind: TaskKind; stage?: GenerationTask['stage'] } | null;
   cancelActiveTask: () => Promise<void>;
   extractRect: { x: number; y: number; width: number; height: number; } | null | undefined;
   extractPreview: { imageId: string; rect: { x: number; y: number; width: number; height: number; }; dataUrl: string; mimeType: "image/png" | "image/jpeg"; width: number; height: number; padded: boolean; } | null;

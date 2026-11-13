@@ -2,7 +2,7 @@ import { useState, type Dispatch, type RefObject, type SetStateAction } from 're
 import { Icon } from '../Icon';
 import { thumbUrl } from '../api';
 import { useLanguage } from '../i18n';
-import type { FusionMode, ProjectImage } from '../types';
+import type { FusionMode, GenerationTask, ProjectImage } from '../types';
 import { fusionDescriptionKeys, fusionTypeIcons, fusionTypeKeys } from './definitions';
 import type { TaskKind } from './types';
 
@@ -13,7 +13,7 @@ export type FusionPanelProps = {
   generating: boolean;
   setFusionType: Dispatch<SetStateAction<FusionMode>>;
   setFusionPoint: Dispatch<SetStateAction<{ x: number; y: number; } | null>>;
-  activeTask: { id: string | null; kind: TaskKind; stage?: "planning" | "compositing" | "generating" | "preserving" | "validating" | null | undefined; } | null;
+  activeTask: { id: string | null; kind: TaskKind; stage?: GenerationTask['stage'] } | null;
   cancelActiveTask: () => Promise<void>;
   fusionImages: ProjectImage[];
   fusionFileRef: RefObject<HTMLInputElement | null>;

@@ -90,6 +90,19 @@
     }
   },
   {
+    "id": "layerive.crop",
+    "version": "1.0.0",
+    "apiVersion": 1,
+    "operation": "crop_image",
+    "route": "crop",
+    "timeoutMs": 60000,
+    "requirements": {
+      "image": [],
+      "vision": false,
+      "multipleImages": "none"
+    }
+  },
+  {
     "id": "layerive.remove-background",
     "version": "1.0.0",
     "apiVersion": 1,

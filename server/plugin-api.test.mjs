@@ -80,7 +80,7 @@ test('generic plugin API matches legacy operations and preserves plugin provenan
     return payload;
   }
   const { plugins } = await request('/plugins');
-  assert.equal(plugins.filter(plugin => plugin.kind !== 'recipe').length, 9);
+  assert.equal(plugins.filter(plugin => plugin.kind !== 'recipe').length, 10);
   assert.ok(plugins.some(plugin => plugin.id === 'layerive.colorize'));
   assert.ok(!JSON.stringify(plugins).includes('workflow'), 'the public catalog must not expose workflow prompts');
   assert.ok(!JSON.stringify(plugins).includes('plugin-test-secret'));
@@ -120,8 +120,12 @@ test('generic plugin API matches legacy operations and preserves plugin provenan
     assert.deepEqual(signatures[0], signatures[1], plugin.id + ': generic and legacy outputs must agree');
     assert.equal(calls.filter(url => url.endsWith('/chat/completions')).length - visionBefore, plugin.requirements.vision ? 2 : 0);
     const count = calls.length;
-    await request(prefix + '/plugins/' + plugin.id + '/run', { ...input, modelId: 'no-edit' }, 400);
-    assert.equal(calls.length, count, 'incompatible model must not be called');
+    // Crop runs entirely locally (requirements.image is empty), so it accepts
+    // any model; capability rejection only applies to plugins that need one.
+    if (plugin.requirements.image.length > 0) {
+      await request(prefix + '/plugins/' + plugin.id + '/run', { ...input, modelId: 'no-edit' }, 400);
+      assert.equal(calls.length, count, 'incompatible model must not be called');
+    }
   }
   for (const id of ['missing', 'constructor', '__proto__']) {
     const error = await request(prefix + '/plugins/' + id + '/run', {}, 404);

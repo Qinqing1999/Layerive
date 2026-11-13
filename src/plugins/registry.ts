@@ -2,6 +2,7 @@ import type { TranslationKey } from '../i18n';
 import type { IconName } from '../Icon';
 import type { ImagePluginManifest } from '../types';
 import { imagePluginForOperation as manifest } from './catalog';
+import { CropPanel } from './CropPanel';
 import { ExtractAssetPanel } from './ExtractAssetPanel';
 import { FusionPanel } from './FusionPanel';
 import { LocalEditPanel } from './LocalEditPanel';
@@ -39,6 +40,10 @@ export const workspacePlugins = {
   outpaint: {
     ...manifest('outpaint'), Panel: OutpaintPanel, taskKind: 'outpaint',
     tool: { className: 'outpaint-launch', icon: 'image', label: 'ws.outpaint', exitLabel: 'ws.exitOutpaint', title: 'ws.outpaintTitle', exitTitle: 'ws.exitOutpaintTitle' },
+  },
+  crop_image: {
+    ...manifest('crop_image'), Panel: CropPanel, taskKind: 'crop',
+    tool: { className: 'crop-launch', icon: 'crop', label: 'ws.crop', exitLabel: 'ws.exitCrop', title: 'ws.cropTitle', exitTitle: 'ws.exitCropTitle' },
   },
   enhance: {
     ...manifest('enhance'), Panel: null, taskKind: 'enhance',

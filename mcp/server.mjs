@@ -604,7 +604,7 @@ server.registerTool(
   'list_plugins',
   {
     title: '图片操作能力',
-    description: '列出服务端内置的图片操作插件（扩图、增强、去水印、去元素、改字、局部改、融合、提取主体、去背景），以及每个插件对模型能力的要求。',
+    description: '列出服务端内置的图片操作插件（裁剪、扩图、增强、去水印、去元素、改字、局部改、融合、提取主体、去背景），以及每个插件对模型能力的要求。',
     inputSchema: z.object({}),
   },
   async () => {
@@ -616,6 +616,31 @@ server.registerTool(
       });
       if (data.errors?.length) lines.push(`\n加载失败的插件：${data.errors.join('; ')}`);
       return ok(lines.join('\n'));
+    } catch (e) { return fail(e); }
+  },
+);
+
+server.registerTool(
+  'crop_image',
+  {
+    title: '裁剪',
+    description: '把图片裁成指定区域，只保留框选范围内的原始像素，不缩放、不重绘，也不调用任何模型（纯本地 Sharp 裁剪，不消耗生图额度）。' +
+      'rect 用图片百分比表示：{x, y, width, height}，取值 0–100，左上角为原点。返回裁剪后的实际像素尺寸。',
+    inputSchema: z.object({
+      project: z.string().min(1).describe('项目 id 或唯一名称'),
+      image_id: z.string().min(1).describe('要裁剪的图片 id（项目内）'),
+      rect: z.object({
+        x: z.number().min(0).max(100),
+        y: z.number().min(0).max(100),
+        width: z.number().min(0).max(100),
+        height: z.number().min(0).max(100),
+      }).describe('要保留的百分比矩形，左上角为原点'),
+      timeout_seconds: z.number().int().min(10).max(1800).optional().describe('等待完成的秒数，默认 300'),
+    }),
+  },
+  async ({ project, image_id, rect, timeout_seconds }) => {
+    try {
+      return ok(await runPlugin(project, 'layerive.crop', { imageId: image_id, rect }, timeout_seconds));
     } catch (e) { return fail(e); }
   },
 );

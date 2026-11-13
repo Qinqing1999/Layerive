@@ -8,7 +8,7 @@ export type IconName =
   | 'close' | 'star' | 'starFilled' | 'duplicate' | 'export' | 'image' | 'branch'
   | 'tree' | 'up' | 'down' | 'left' | 'sparkle' | 'box' | 'edit' | 'download' | 'gallery' | 'extract'
   | 'sun' | 'moon' | 'sliders' | 'logs' | 'eye' | 'eyeOff' | 'github' | 'trash' | 'background'
-  | 'layers' | 'shirt' | 'pose' | 'users' | 'check' | 'gem' | 'home';
+  | 'layers' | 'shirt' | 'pose' | 'users' | 'check' | 'gem' | 'home' | 'crop';
 
 const paths: Record<IconName, React.ReactNode> = {
   home: <><path d="m3 11 9-8 9 8M5 10v11h14V10M9 21v-7h6v7" /></>,
@@ -39,6 +39,7 @@ const paths: Record<IconName, React.ReactNode> = {
   left: <path d="M19 12H6m0 0 5.5-5.5M6 12l5.5 5.5" />,
   sparkle: <path d="M12 4c.6 3.8 2 5.6 6 6.5-4 .9-5.4 2.7-6 6.5-.6-3.8-2-5.6-6-6.5 4-.9 5.4-2.7 6-6.5Z" />,
   box: <path d="M4.5 4.5h15v15h-15z" strokeDasharray="3.5 2.5" />,
+  crop: <><path d="M7 2.5v14.5h14.5" /><path d="M2.5 7H17v14.5" /></>,
   edit: <><path d="M4 20h4.2L19.6 8.6a1.9 1.9 0 0 0-2.7-2.7L5.5 17.3 4 20Z" /><path d="m14.5 8 2.5 2.5" /></>,
   download: <><path d="M12 3.5V14" /><path d="m7.5 9.5 4.5 4.5 4.5-4.5" /><path d="M4.5 17v2a1.5 1.5 0 0 0 1.5 1.5h12a1.5 1.5 0 0 0 1.5-1.5v-2" /></>,
   gallery: <><rect x="3.5" y="3.5" width="17" height="17" rx="2" /><circle cx="9" cy="9" r="1.8" /><path d="m4.8 16.5 3.7-3.8 2.6 2.7 3.2-3.3 5 5" /></>,
