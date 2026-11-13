@@ -292,7 +292,7 @@ export function HomeView({ projects, images, loading, imagesLoading, onOpen, onC
                     className={`project-cover ${project.coverUrl ? 'has-image' : `cover-fallback-${index % 4}`}`}
                   >
                     {project.coverUrl
-                      ? <img src={project.coverUrl} alt="" loading="lazy" />
+                      ? <img src={`${project.coverUrl}?w=480&fmt=webp`} alt="" loading="lazy" decoding="async" />
                       : <><div className="cover-orb orb-one" /><div className="cover-orb orb-two" /></>}
                     <span>V{project.versionCount}</span>
                   </div>
@@ -311,7 +311,7 @@ export function HomeView({ projects, images, loading, imagesLoading, onOpen, onC
             {visible.map((project) => (
               <div className="project-row" key={project.id} onDoubleClick={() => onOpen(project.id)}>
                 <button className="project-row-main" onClick={() => onOpen(project.id)}>
-                  {project.coverUrl ? <img className="row-cover" src={project.coverUrl} alt="" /> : <span className="row-cover placeholder"><Icon name="image" size={20} /></span>}
+                  {project.coverUrl ? <img className="row-cover" src={`${project.coverUrl}?w=160&fmt=webp`} alt="" loading="lazy" decoding="async" /> : <span className="row-cover placeholder"><Icon name="image" size={20} /></span>}
                   <span className="row-copy"><strong>{project.name}</strong><small>{project.description || t('home.noDescription')}</small></span>
                 </button>
                 <span>V{project.versionCount}</span>

@@ -84,35 +84,81 @@ async function planWithVision(host, image, visionModel) {
   };
 }
 
+// Local mattes are checked against the source picture by the vision model
+// before they are accepted; an explicit rejection hands the job to the model.
+const CHECK_TIMEOUT_MS = 60000;
+
+async function checkLocalMatte(host, source, cut, image, visionModel) {
+  const { projectId, taskId, signal, parseVisionJson, callVision } = host;
+  const instruction = `检查本地抠图结果是否合格。图1 是原图，图2 是本地抠图得到的透明背景结果。
+判断标准：
+1. 图2 是否正确保留了图1 中最可能作为前景主要主体的人物、动物或物体组，没有错切到别的对象，也没有把主要主体误删。
+2. 保留的主体是否完整：轮廓没有明显残缺、断裂或缺失的关键部位。
+3. 主体边缘是否干净自然：没有明显白边、黑边、色边、大块残留背景、棋盘格或纯色底。
+4. 是否存在大面积应该删除却仍保留的背景或陪衬元素。
+只要上述任一条明显不满足即判定不合格；全部满足才判定合格。
+返回严格 JSON：{"pass": true 或 false, "confidence": 0到1, "reason": "简短判定说明"}。不要返回 Markdown。`;
+  const planned = parseVisionJson(await callVision(visionModel, [
+    { buffer: source, mime_type: image.mime_type || 'image/png' },
+    { buffer: cut, mime_type: 'image/png' },
+  ], instruction, signal, { projectId, taskId, operationType: 'remove_background', phase: '本地抠图质量检查' }, { timeoutMs: CHECK_TIMEOUT_MS }));
+  signal.throwIfAborted();
+  const pass = planned?.pass === true || String(planned?.pass ?? '').trim().toLowerCase() === 'true';
+  return {
+    pass,
+    reason: String(planned?.reason || '').trim(),
+    confidence: Number.isFinite(Number(planned?.confidence)) ? Math.min(1, Math.max(0, Number(planned?.confidence))) : null,
+  };
+}
+
 async function prepare(host, image, state) {
   const { httpError, updateTask, providerInputBytes, signal } = host;
   const strategy = state.strategy || 'ai';
   const visionModel = state.visionModel || null;
+  let localRejection = null;
   if (strategy !== 'ai') {
     try {
       const source = await providerInputBytes(image);
       const cut = await cutoutLocal(source, { signal, rect: state.rect || null, feather: state.feather || null });
       const stats = await alphaStats(cut);
-      if (stats.usable) {
+      if (stats.usable && visionModel) {
+        let verdict = null;
+        try {
+          verdict = await checkLocalMatte(host, source, cut, image, visionModel);
+        } catch (error) {
+          if (error?.name === 'AbortError') throw error;
+          // The check is a safety net, not a gate: when it cannot run, keep the
+          // quantitatively valid matte instead of failing the whole task.
+          updateTask({ backgroundRemoval: { strategy: 'local', mattedBy: 'local', checkedBy: 'vision', visionReason: `本地抠图质量检查未能完成（${error?.message || error}），已按定量校验结果采用本地抠图`, visionConfidence: null } });
+          return { image, local: { bytes: cut, mimeType: 'image/png', width: stats.width, height: stats.height } };
+        }
+        if (verdict.pass) {
+          updateTask({ backgroundRemoval: { strategy: 'local', mattedBy: 'local', checkedBy: 'vision', visionReason: verdict.reason, visionConfidence: verdict.confidence, keepSubjects: [], discarded: [], reason: '', confidence: null } });
+          return { image, local: { bytes: cut, mimeType: 'image/png', width: stats.width, height: stats.height } };
+        }
+        // Explicit rejection: the matte is visually wrong. Both auto and local
+        // then hand the cut-out over to the image model instead of shipping it.
+        localRejection = `视觉模型判定本地抠图不合格（${verdict.reason || '未通过质量检查'}）`;
+      } else if (stats.usable) {
         updateTask({ backgroundRemoval: { strategy: 'local', mattedBy: 'local', keepSubjects: [], discarded: [], reason: '', confidence: null } });
         return { image, local: { bytes: cut, mimeType: 'image/png', width: stats.width, height: stats.height } };
-      }
-      // A matte that kept nothing or erased everything is not worth showing.
-      if (strategy === 'local') {
+      } else if (strategy === 'local') {
         throw httpError(422, 'backgroundRemoval.invalidOutput', '本地抠图没有找到可保留的主体，请换一张主体更明确的图片，或改用模型抠图');
+      } else {
+        localRejection = '本地抠图结果不可用';
       }
-      updateTask({ backgroundRemoval: { strategy: 'local', mattedBy: 'local', usable: false, reason: '本地抠图结果不可用，已改用模型抠图' } });
     } catch (error) {
       if (strategy === 'local') throw error;
       if (error?.name === 'AbortError') throw error;
-      updateTask({ backgroundRemoval: { strategy: 'local', mattedBy: 'local', usable: false, reason: `本地抠图不可用（${error?.message || error}），已改用模型抠图` } });
+      localRejection = `本地抠图不可用（${error?.message || error}）`;
     }
+    updateTask({ backgroundRemoval: { strategy: 'local', mattedBy: 'local', usable: false, reason: `${localRejection}，已改用模型抠图` } });
   }
   if (!visionModel) throw httpError(400, 'backgroundRemoval.requiresVisionModel', '改用模型抠图需要先配置视觉识别模型');
   // Reaching this point means a model has to draw the cut-out after all.
   requireModelCanCutOut(host, host.readModels().models.find((item) => item.id === state.modelId) || null);
   const plan = await planWithVision(host, image, visionModel);
-  updateTask({ backgroundRemoval: { visionModelId: visionModel.id, strategy: 'ai', mattedBy: 'model', keepSubjects: plan.keepSubjects, discarded: plan.discarded, reason: plan.reason, confidence: plan.confidence } });
+  updateTask({ backgroundRemoval: { visionModelId: visionModel.id, strategy: 'ai', mattedBy: 'model', keepSubjects: plan.keepSubjects, discarded: plan.discarded, reason: plan.reason, confidence: plan.confidence, ...(localRejection ? { localRejection } : {}) } });
   return { image, prompt: plan.editPrompt };
 }
 

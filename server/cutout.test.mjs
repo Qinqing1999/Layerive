@@ -88,6 +88,137 @@ test('cutoutLocal reports a failing service instead of throwing a raw fetch erro
   }
 });
 
+test('local mattes are vision-checked and rejected ones fall back to the model path', { timeout: 120000 }, async (t) => {
+  const root = path.resolve(import.meta.dirname, '..');
+  await mkdir(path.join(root, 'work'), { recursive: true });
+  const testRoot = await mkdtemp(path.join(root, 'work', 'cutout-check-'));
+  const dataRoot = path.join(testRoot, 'data');
+  const configRoot = path.join(testRoot, 'config');
+  await mkdir(configRoot);
+  const source = await opaque(160, 120);
+  const matted = await matte(160, 120);
+  let cutoutAnswers = matted;
+  const stub = await cutoutStub(t, async () => ({ status: 200, body: cutoutAnswers, type: 'image/png' }));
+  let matteVerdict = { pass: true, confidence: 0.9, reason: '主体保留完整，边缘干净' };
+  let visionCalls = [];
+  let imageEdits = 0;
+  const model = http.createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const bytes = Buffer.concat(chunks);
+    if (req.url.endsWith('/chat/completions')) {
+      visionCalls.push(JSON.parse(bytes.toString('utf8')));
+      // The local matte check and the AI fallback planning ask different questions.
+      const instruction = JSON.stringify(visionCalls.at(-1));
+      const content = instruction.includes('本地抠图结果是否合格')
+        ? JSON.stringify(matteVerdict)
+        : JSON.stringify({ keep_subjects: ['画面中央的主体'], discard_as_background: ['背景'], reason: '主体位于画面中央', confidence: 0.92, edit_prompt: '只保留画面中央的主体，其余背景全部移除并输出透明 PNG。' });
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ choices: [{ message: { content } }] }));
+      return;
+    }
+    // The AI fallback draws the cut-out; echo a valid transparent matte.
+    imageEdits += 1;
+    assert.match(req.headers['content-type'] || '', /multipart\/form-data/);
+    const form = await new Response(bytes, { headers: { 'Content-Type': req.headers['content-type'] } }).formData();
+    assert.match(form.get('prompt'), /硬性要求/);
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({ data: [{ b64_json: matted.toString('base64') }] }));
+  });
+  await new Promise((resolve) => model.listen(0, '127.0.0.1', resolve));
+  const modelUrl = `http://127.0.0.1:${model.address().port}`;
+  t.after(async () => {
+    model.closeAllConnections();
+    await new Promise((resolve) => model.close(resolve));
+  });
+  await writeFile(path.join(configRoot, 'models.json'), JSON.stringify({
+    active_model: 'image',
+    active_vision_model: 'vision',
+    models: [
+      { id: 'image', name: 'Image stub', provider: 'openai', type: 'image', model: 'fixture', baseUrl: modelUrl, apiKey: 'local-test-placeholder', capabilities: ['text_to_image', 'edit_prompt'], defaultParams: { size: '1024x1024' }, outputFormats: ['png'], transparentBackground: true },
+      { id: 'vision', name: 'Vision stub', provider: 'openai', type: 'vision', apiFormat: 'chat_completions', model: 'fixture', baseUrl: modelUrl, apiKey: 'local-test-placeholder' },
+    ],
+  }));
+  const child = spawn(process.execPath, ['server/index.mjs'], {
+    cwd: root,
+    windowsHide: true,
+    env: { ...process.env, PIXELFLOW_API_PORT: '0', LAYERIVE_DATA_ROOT: dataRoot, LAYERIVE_CONFIG_ROOT: configRoot, LAYERIVE_CUTOUT_URL: stub.url },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let logs = '';
+  child.stdout.on('data', (chunk) => { logs += chunk; });
+  child.stderr.on('data', (chunk) => { logs += chunk; });
+  t.after(async () => { if (child.exitCode == null) { const exited = once(child, 'exit'); child.kill(); await exited; } });
+  const waitUntil = async (check, timeout = 15000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      if (await check()) return true;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw new Error(`timed out waiting: ${logs}`);
+  };
+  await waitUntil(() => /127\.0\.0\.1:\d+/.test(logs), 10000);
+  const base = logs.match(/http:\/\/127\.0\.0\.1:\d+/)[0];
+  const request = async (url, body, expected = 200) => {
+    const response = await fetch(`${base}/api${url}`, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+    const payload = await response.json();
+    assert.equal(response.status, expected, JSON.stringify(payload));
+    return payload;
+  };
+  const finished = async (projectId, taskId) => {
+    let task;
+    await waitUntil(async () => { task = await request(`/projects/${projectId}/tasks/${taskId}`); return task.status !== 'generating'; });
+    return task;
+  };
+  // The local-vs-model decision is observable through the model log phases.
+  const phasesFor = async (projectId, taskId) => {
+    const { logs } = await request(`/projects/${projectId}/model-logs?limit=50`);
+    return logs.filter((log) => log.taskId === taskId).map((log) => log.phase);
+  };
+
+  const { project } = await request('/projects', { name: 'Cut-out check fixture' }, 201);
+  const uploaded = await request(`/projects/${project.id}/images`, { data: source.toString('base64'), mimeType: 'image/png', name: 'source.png' }, 201);
+  const imageId = uploaded.project.currentImageId;
+
+  // 1) A passing check keeps the local matte: no image model call at all.
+  {
+    const started = await request(`/projects/${project.id}/remove-background`, { imageId, modelId: 'image', strategy: 'local' }, 202);
+    const task = await finished(project.id, started.taskId);
+    assert.equal(task.status, 'success', task.error);
+    assert.equal(stub.seen.length, 1);
+    assert.equal(visionCalls.length, 1, 'the matte must be checked exactly once');
+    assert.match(JSON.stringify(visionCalls[0]), /本地抠图结果是否合格/);
+    assert.equal(visionCalls[0].messages.at(-1).content.filter((item) => item.type === 'image_url').length, 2, 'the check must see both the source and the matte');
+    assert.equal(imageEdits, 0, 'a passing matte must not reach the image model');
+    assert.deepEqual(await phasesFor(project.id, started.taskId), ['本地抠图质量检查']);
+  }
+
+  // 2) A failing check falls back to the AI path for both auto and local.
+  matteVerdict = { pass: false, confidence: 0.8, reason: '主体边缘有严重白边' };
+  for (const strategy of ['auto', 'local']) {
+    const started = await request(`/projects/${project.id}/remove-background`, { imageId, modelId: 'image', strategy }, 202);
+    const task = await finished(project.id, started.taskId);
+    assert.equal(task.status, 'success', task.error);
+    assert.deepEqual(
+      (await phasesFor(project.id, started.taskId)).sort(),
+      ['主要主体识别与透明背景规划', '去除背景并生成透明 PNG', '本地抠图质量检查'].sort(),
+      `strategy ${strategy} must check the matte, then plan and draw with the model`,
+    );
+  }
+  // Exactly one extra matte request per fallback, plus the AI edit per task.
+  assert.equal(stub.seen.length, 3);
+  assert.equal(imageEdits, 2);
+  assert.equal(visionCalls.length, 5, 'each fallback checks the matte and then plans the subject');
+
+  // 3) An unparseable check cannot block the matte: it is kept as-is.
+  matteVerdict = { pass: 'true', nonsense: true };
+  const started = await request(`/projects/${project.id}/remove-background`, { imageId, modelId: 'image', strategy: 'local' }, 202);
+  const task = await finished(project.id, started.taskId);
+  assert.equal(task.status, 'success', task.error);
+  assert.equal(imageEdits, 2, 'a malformed-but-true verdict must not trigger a fallback');
+  assert.deepEqual(await phasesFor(project.id, started.taskId), ['本地抠图质量检查']);
+});
+
 test('background removal cuts out locally and never asks an image model', { timeout: 120000 }, async (t) => {
   const root = path.resolve(import.meta.dirname, '..');
   await mkdir(path.join(root, 'work'), { recursive: true });
