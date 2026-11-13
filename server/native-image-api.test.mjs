@@ -193,6 +193,12 @@ test('native image APIs: presets, all seven models, generation/editing/fusion/lo
   const { model: custom } = await request('/models', { name: 'Custom Qwen gateway', type: 'image', provider: 'custom', imageApiFormat: 'qwen_images', model: 'qwen-image-3.0-pro', baseUrl: `${stubBase}/v1`, apiKey: 'fixture-key', outputFormats: ['webp'], transparentBackground: true }, 201);
   assert.equal(custom.provider, 'custom'); assert.equal(custom.imageApiFormat, 'qwen_images');
   assert.deepEqual(custom.outputFormats, ['png']); assert.equal(custom.transparentBackground, false);
+  // 日日新复用 OpenAI Images 的协议形状，但接口没有透明参数：即使配置里写了
+  // transparentBackground: true 也必须被归一化为 false，否则工作台会给出一个
+  // 点了必然在 Alpha 校验失败的「去除背景」按钮。
+  const { model: sensenovaModel } = await request('/models', { name: 'SenseNova transparency', type: 'image', provider: 'sensenova', model: 'sensenova-u1.5-lite', baseUrl: `${stubBase}/v1`, apiKey: 'fixture-key', capabilities: ['edit_prompt'], outputFormats: ['png'], transparentBackground: true }, 201);
+  assert.equal(sensenovaModel.imageApiFormat, 'openai_images');
+  assert.equal(sensenovaModel.transparentBackground, false, 'SenseNova has no transparent-background parameter');
   for (const model of saved) await request('/models', { ...model, id: '', type: 'vision' }, 400);
   const reloaded = (await request('/models')).models;
   assert.ok(saved.every(model => reloaded.some(item => item.id === model.id && item.imageApiFormat === model.imageApiFormat && item.provider === model.provider)));

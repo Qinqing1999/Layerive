@@ -30,6 +30,8 @@ export function nativeImagePreset(provider: ModelConfig['provider']) {
   return provider === 'seedream' || provider === 'qwen' || provider === 'flux' ? NATIVE_IMAGE_PRESETS[provider] : undefined;
 }
 
-export function supportsTransparentProtocol(protocol: ModelConfig['imageApiFormat'], model: string) {
+/** 日日新复用 OpenAI Images 的协议形状，但接口没有透明参数，必须排除。 */
+export function supportsTransparentProtocol(protocol: ModelConfig['imageApiFormat'], model: string, provider?: ModelConfig['provider']) {
+  if (provider === 'sensenova') return false;
   return protocol === 'openai_images' || (protocol === 'qwen_images' && /^qwen-image-2\.1-(pro|turbo)$/.test(model));
 }

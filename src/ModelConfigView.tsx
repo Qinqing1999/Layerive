@@ -197,12 +197,12 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
     const allowed = outputFormatsForProtocol(imageApiFormat);
     setForm((current) => {
       const outputFormats = (current.outputFormats || []).filter((format): format is typeof allowed[number] => (allowed as readonly string[]).includes(format));
-      return { ...current, imageApiFormat, outputFormats: outputFormats.length ? outputFormats : [allowed[0]], transparentBackground: supportsTransparentProtocol(imageApiFormat, current.model) && Boolean(current.transparentBackground) };
+      return { ...current, imageApiFormat, outputFormats: outputFormats.length ? outputFormats : [allowed[0]], transparentBackground: supportsTransparentProtocol(imageApiFormat, current.model, current.provider) && Boolean(current.transparentBackground) };
     });
   }
   function changeModel(model: string) {
     setTestResult('');
-    setForm(current => ({ ...current, model, transparentBackground: current.imageApiFormat === 'qwen_images' ? supportsTransparentProtocol(current.imageApiFormat, model) : current.transparentBackground }));
+    setForm(current => ({ ...current, model, transparentBackground: current.imageApiFormat === 'qwen_images' ? supportsTransparentProtocol(current.imageApiFormat, model, current.provider) : current.transparentBackground }));
   }
   function toggleCapability(capability: string) {
     update('capabilities', form.capabilities.includes(capability) ? form.capabilities.filter((item) => item !== capability) : [...form.capabilities, capability]);
@@ -346,7 +346,7 @@ export function ModelConfigView({ models, activeModel, activeVisionModel, onBack
             </div>
             <fieldset className="capability-field"><legend>{t('mc.output')}</legend><div className="capability-options">
               {outputFormatsForProtocol(form.imageApiFormat || 'openai_images').map((value) => <label key={value} className={form.outputFormats?.includes(value) ? 'checked' : ''}><input type="checkbox" checked={form.outputFormats?.includes(value) || false} onChange={() => update('outputFormats', form.outputFormats?.includes(value) ? form.outputFormats.filter((item) => item !== value) : [...(form.outputFormats || []), value])} /><span>{value.toUpperCase()}</span></label>)}
-              {supportsTransparentProtocol(form.imageApiFormat, form.model) && <label className={form.transparentBackground ? 'checked' : ''}><input type="checkbox" checked={Boolean(form.transparentBackground)} onChange={() => update('transparentBackground', !form.transparentBackground)} /><span>{t('mc.transparentBackground')}</span></label>}
+              {supportsTransparentProtocol(form.imageApiFormat, form.model, form.provider) && <label className={form.transparentBackground ? 'checked' : ''}><input type="checkbox" checked={Boolean(form.transparentBackground)} onChange={() => update('transparentBackground', !form.transparentBackground)} /><span>{t('mc.transparentBackground')}</span></label>}
             </div></fieldset>
           </> : <div className="vision-guide"><strong>{t('mc.visionUseTitle')}</strong><p>{t('mc.visionUseBody')}</p></div>}
           {testResult && <div className="test-result">{testResult}</div>}

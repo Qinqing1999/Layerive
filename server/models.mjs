@@ -106,7 +106,10 @@ function normalizeImageModel(model) {
     defaultParams,
     sizeOptions: validSizeOptions(model.sizeOptions, preset.sizeOptions),
     outputFormats: outputFormats.length ? outputFormats : [allowedFormats[0]],
-    transparentBackground: (protocol === 'openai_images' || (protocol === 'qwen_images' && /^qwen-image-2\.1-(pro|turbo)$/.test(model.model))) && Boolean(model.transparentBackground ?? preset.transparentBackground),
+    // 日日新虽然复用 OpenAI Images 的协议形状，但接口没有透明参数
+    // （docs/model-providers.md 记录过），所以这里必须把 provider 也纳入判断，
+    // 否则界面会给出一个点了必然失败的「透明背景」开关。
+    transparentBackground: provider !== 'sensenova' && (protocol === 'openai_images' || (protocol === 'qwen_images' && /^qwen-image-2\.1-(pro|turbo)$/.test(model.model))) && Boolean(model.transparentBackground ?? preset.transparentBackground),
     maxCount: Math.max(1, Math.min(4, Number(model.maxCount) || preset.maxCount)),
   };
 }
