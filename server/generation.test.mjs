@@ -103,9 +103,8 @@ test('generate API: automatic multi-image intent, concurrency, retry, ZIP and pr
     { id: 'sensenova', name: 'SenseNova image stub', provider: 'sensenova', type: 'image', model: 'sensenova-u1.5-lite', baseUrl: stubUrl, apiKey: 'local-test-placeholder', capabilities: ['text_to_image', 'edit_prompt'], defaultParams: { size: '2048x2048' }, outputFormats: ['png', 'jpeg', 'webp'] },
     { id: 'vision', name: 'Vision stub', provider: 'openai', type: 'vision', apiFormat: 'chat_completions', model: 'fixture', baseUrl: stubUrl, apiKey: 'local-test-placeholder' },
   ] }));
-  const child = spawn(process.execPath, ['server/index.mjs'], { cwd: root, windowsHide: true, // LAYERIVE_CUTOUT_URL is cleared so the model-based background removal path
-  // stays the one under test; cut-out coverage lives in cutout.test.mjs.
-  env: { ...process.env, PIXELFLOW_API_PORT: '0', LAYERIVE_DATA_ROOT: dataRoot, LAYERIVE_CONFIG_ROOT: configRoot, LAYERIVE_CUTOUT_URL: '' }, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = spawn(process.execPath, ['server/index.mjs'], { cwd: root, windowsHide: true,
+  env: { ...process.env, PIXELFLOW_API_PORT: '0', LAYERIVE_DATA_ROOT: dataRoot, LAYERIVE_CONFIG_ROOT: configRoot }, stdio: ['ignore', 'pipe', 'pipe'] });
   let logs = '';
   child.stdout.on('data', (chunk) => { logs += chunk; });
   child.stderr.on('data', (chunk) => { logs += chunk; });

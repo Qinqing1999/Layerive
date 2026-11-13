@@ -41,13 +41,12 @@ type Props = {
   activeVisionModel: string;
   // Local matting is available on the server; background removal then works
   // even with a model that cannot return transparent PNG.
-  cutoutEnabled?: boolean;
   onBack: () => void;
   onModels: () => void;
   onProjectChanged: () => void;
   notify: (message: string, kind?: 'success' | 'error') => void;
 };
-const removeBackgroundStageKeys: Record<string, TranslationKey> = { planning: 'ws.removeBackgroundStagePlanning', cutting: 'ws.removeBackgroundStageCutting', generating: 'ws.removeBackgroundStageGenerating', validating: 'ws.removeBackgroundStageValidating' };
+const removeBackgroundStageKeys: Record<string, TranslationKey> = { planning: 'ws.removeBackgroundStagePlanning', generating: 'ws.removeBackgroundStageGenerating', validating: 'ws.removeBackgroundStageValidating' };
 
 const operationKeys: Record<string, TranslationKey> = { fusion: 'op.fusion', auto: 'op.auto', upload: 'op.upload', text_to_image: 'op.text_to_image', image_to_image: 'op.image_to_image', edit_prompt: 'op.edit_prompt', batch_edit: 'op.batch_edit', batch_generate: 'op.batch_generate', edit_text: 'op.edit_text', recognize_text: 'op.recognize_text', local_edit: 'op.local_edit', remove_element: 'op.remove_element', outpaint: 'op.outpaint', crop_image: 'op.crop', enhance: 'op.enhance', remove_watermark: 'op.remove_watermark', remove_background: 'op.remove_background', extract_asset: 'op.extract_asset', gallery_analyze: 'op.gallery_analyze' };
 const localeFor = (language: Language) => (language === 'zh' ? 'zh-CN' : 'en-US');
@@ -417,7 +416,7 @@ function ModelLogsModal({ projectId, onClose }: { projectId: string; onClose: ()
   );
 }
 
-export function WorkspaceView({ projectId, focusImageId = null, models, activeModel, activeVisionModel, cutoutEnabled = false, onBack, onModels, onProjectChanged, notify }: Props) {
+export function WorkspaceView({ projectId, focusImageId = null, models, activeModel, activeVisionModel, onBack, onModels, onProjectChanged, notify }: Props) {
   const { language, t } = useLanguage();
   const confirm = useConfirm();
   const recipeCatalog = useRecipeCatalog();
@@ -628,7 +627,7 @@ export function WorkspaceView({ projectId, focusImageId = null, models, activeMo
   const selectedModel = imageModels.find((model) => model.id === modelId);
   // Local matting finishes the picture on the server, so it works with any
   // image model; only the model-based path needs transparent PNG output.
-  const backgroundRemovalSupported = cutoutEnabled || Boolean(selectedModel?.transparentBackground && selectedModel.outputFormats?.includes('png'));
+  const backgroundRemovalSupported = Boolean(selectedModel?.transparentBackground && selectedModel.outputFormats?.includes('png'));
   const batchEditSupported = Boolean(selectedModel?.capabilities.includes('edit_prompt'));
   const batchTextSupported = Boolean(selectedModel?.capabilities.includes('text_to_image'));
   const selectedVisionModel = visionModels.find((model) => model.id === visionModelId);

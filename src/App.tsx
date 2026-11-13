@@ -32,7 +32,6 @@ export default function App() {
   const [models, setModels] = useState<ModelConfig[]>([]);
   const [activeModel, setActiveModel] = useState('');
   const [activeVisionModel, setActiveVisionModel] = useState('');
-  const [cutoutEnabled, setCutoutEnabled] = useState(false);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ message: string; kind: 'success' | 'error' } | null>(null);
 
@@ -62,7 +61,6 @@ export default function App() {
     setModels(data.models);
     setActiveModel(data.activeModel);
     setActiveVisionModel(data.activeVisionModel);
-    setCutoutEnabled(Boolean(data.cutout?.enabled));
   }, []);
   const handleProjectChanged = useCallback(() => { void refreshProjects(); void refreshImages(); }, [refreshProjects, refreshImages]);
 
@@ -212,7 +210,7 @@ export default function App() {
     <>
       {view.name === 'home' && <HomeView projects={projects} images={images} loading={loading} imagesLoading={imagesLoading} onOpen={(projectId, imageId) => setView({ name: 'workspace', projectId, focusImageId: imageId ?? null })} onOpenLibraryImage={openLibraryImage} onDeleteLibraryImage={deleteLibraryImage} onCreate={createProject} onDelete={deleteProject} onDuplicate={duplicateProject} onImport={importProject} onImportImage={importImage} onRefreshProjects={refreshProjects} onModels={() => setView({ name: 'models' })} notify={notify} />}
       {view.name === 'models' && <ModelConfigView models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} onBack={() => view.backTo ? setView({ name: 'workspace', projectId: view.backTo }) : setView({ name: 'home' })} onSave={saveModel} onDelete={deleteModel} onActivate={activateModel} onActivateVision={activateVisionModel} onTestConfig={testModelConfig} onRevealApiKey={revealModelApiKey} onKeyPoolStatus={keyPoolStatus} onFetchModels={fetchUpstreamModels} />}
-      {view.name === 'workspace' && <WorkspaceView projectId={view.projectId} focusImageId={view.focusImageId ?? null} models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} cutoutEnabled={cutoutEnabled} onBack={() => { setView({ name: 'home' }); void refreshProjects(); void refreshImages(); }} onModels={() => setView({ name: 'models', backTo: view.projectId })} onProjectChanged={handleProjectChanged} notify={notify} />}
+      {view.name === 'workspace' && <WorkspaceView projectId={view.projectId} focusImageId={view.focusImageId ?? null} models={models} activeModel={activeModel} activeVisionModel={activeVisionModel} onBack={() => { setView({ name: 'home' }); void refreshProjects(); void refreshImages(); }} onModels={() => setView({ name: 'models', backTo: view.projectId })} onProjectChanged={handleProjectChanged} notify={notify} />}
       {toast && <div className={`toast ${toast.kind}`} role="status"><span>{toast.kind === 'success' ? '✓' : '!'}</span>{toast.message}</div>}
     </>
   );

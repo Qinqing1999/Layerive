@@ -718,32 +718,22 @@ server.registerTool(
   {
     title: '抠图 / 去背景',
     description: '把主体从背景里抠出来，输出带真实透明通道的 PNG。' +
-      'strategy 默认 auto：先在服务器本地用分割模型抠（快、免费、不消耗生图额度），' +
-      '结果不合格再退回图片模型重画；local 只用本地抠图（失败直接报错，不花额度）；ai 只用图片模型。' +
-      '给 rect 可以只抠框里的那一个主体（图片里有多个主体时用）。本地抠图保持原图尺寸与主体位置。',
+      '视觉模型先判断最可能要保留的主体，再由图片模型剔除其余背景，需要图片模型支持提示词改图与透明 PNG。',
     inputSchema: z.object({
       project: z.string().min(1).describe('项目 id 或唯一名称'),
       image_id: z.string().min(1).describe('要抠图的图片 id（项目内）'),
-      strategy: z.enum(['auto', 'local', 'ai']).optional().describe('抠图策略，默认 auto'),
-      rect: z.object({ x: z.number(), y: z.number(), width: z.number(), height: z.number() }).optional()
-        .describe('只抠这个百分比矩形里的主体（本地抠图用）'),
-      feather: z.number().min(0).max(50).optional().describe('边缘羽化像素，仅本地抠图'),
-      model: z.string().optional().describe('图片模型 id，不传用默认模型（仅 ai 策略需要）'),
-      vision_model: z.string().optional().describe('视觉模型 id，不传用默认视觉模型（仅 ai 策略需要）'),
+      model: z.string().optional().describe('图片模型 id，不传用默认模型'),
+      vision_model: z.string().optional().describe('视觉模型 id，不传用默认视觉模型'),
       timeout_seconds: z.number().int().min(10).max(1800).optional().describe('等待完成的秒数，默认 300'),
     }),
   },
-  async ({ project, image_id, strategy, rect, feather, model, vision_model, timeout_seconds }) => {
+  async ({ project, image_id, model, vision_model, timeout_seconds }) => {
     try {
       return ok(await runPlugin(project, 'layerive.remove-background', {
         imageId: image_id,
-        ...(strategy ? { strategy } : {}),
-        ...(rect ? { rect } : {}),
-        ...(feather ? { feather } : {}),
         ...(model ? { modelId: model } : {}),
         ...(vision_model ? { visionModelId: vision_model } : {}),
-      // A local matte keeps the original size; the model path needs the source ratio.
-      }, timeout_seconds, strategy === 'local' ? null : { imageId: image_id }));
+      }, timeout_seconds, { imageId: image_id }));
     } catch (e) { return fail(e); }
   },
 );

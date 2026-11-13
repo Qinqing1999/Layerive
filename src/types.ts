@@ -167,8 +167,7 @@ export type UpstreamModel = {
   outputModalities: string[] | null;
 };
 
-/** `cutout.enabled` tells the workspace that background removal can run locally. */
-export type ModelsPayload = { activeModel: string; activeVisionModel: string; models: ModelConfig[]; cutout?: { enabled: boolean } };
+export type ModelsPayload = { activeModel: string; activeVisionModel: string; models: ModelConfig[] };
 
 export type TextSegment = {
   id: string;

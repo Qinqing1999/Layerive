@@ -16,7 +16,6 @@ import { makeDemoPng, readImageDimensions } from './png.mjs';
 import { hasModelCredentials, bearerHeaders, imageApiFormat, isSenseNovaLegacyVisionEndpoint, isSenseNovaTokenChatEndpoint, modelApiKeys, MASKED_API_KEY, normalizeBaseUrl, publicModel, readModels, removeModel, upsertModel, visionApiFormat, visionEndpoint, writeModels } from './models.mjs';
 import { keyPoolStatus, modelKeys, resetKeyPool, withKeyPool } from './key-pool.mjs';
 import { RATIO_PRESETS, isOriginalSizeToken, isRatioToken, originalSizeFor, ratioOf, ratioToken, sizeForRatio } from './size-options.mjs';
-import { cutoutEnabled } from './cutout.mjs';
 import { createZip, readZip } from './zip.mjs';
 import { normalizeLocalImage, normalizeSenseNovaInput, preserveOutsideRegion, preserveOutsideRegions, referenceBytes, validateRect } from './local-edit.mjs';
 
@@ -3253,9 +3252,7 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === '/api/models' && req.method === 'GET') {
       const config = readModels();
-      // The browser needs to know whether background removal can run locally:
-      // that path does not require a model with transparent PNG output.
-      return json(res, 200, { activeModel: config.active_model, activeVisionModel: config.active_vision_model, models: config.models.map(publicModel), cutout: { enabled: cutoutEnabled() } });
+      return json(res, 200, { activeModel: config.active_model, activeVisionModel: config.active_vision_model, models: config.models.map(publicModel) });
     }
     if (pathname === '/api/gallery' && req.method === 'GET') return json(res, 200, { entries: listGalleryEntries() });
     if (pathname === '/api/gallery' && req.method === 'POST') return json(res, 201, { entry: galleryDto(await upsertGalleryEntry(await body(req, 32 * 1024 * 1024))) });

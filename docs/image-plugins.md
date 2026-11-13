@@ -52,7 +52,7 @@
 | server/plugins/recipes/*/plugin.json | 独立的 JSON 插件声明；当前包含 colorize |
 | server/plugins/host.mjs | 项目/任务范围内的服务接口；凭据留在宿主模型快照中 |
 | server/plugins/{local-edit,remove-element,extract-asset,fusion}.mjs | 操作输入校验、规划与结果要求 |
-| server/plugins/{edit-text,remove-background,remove-watermark,outpaint,enhance}.mjs | 文字规划与输出快照、透明主体校验与本地抠图视觉质检、水印规划、扩图及清晰度提示词 |
+| server/plugins/{edit-text,remove-background,remove-watermark,outpaint,enhance,crop}.mjs | 文字规划与输出快照、透明主体校验、水印规划、扩图与清晰度提示词、纯本地裁剪 |
 | server/plugins/crop.mjs | 纯本地裁剪：校验百分比矩形、`autoOrient()` 后按已定向画幅换算像素、`extract()` 出 PNG，`local.bytes` 直接交付，不调用任何模型 |
 | server/plugins/preserve-output.mjs | 请求宿主执行单区或多区像素保护的共用后处理 |
 | server/index.mjs | HTTP、材料文件、模型适配/重试、任务生命周期、SQLite 事务和版本发布 |
