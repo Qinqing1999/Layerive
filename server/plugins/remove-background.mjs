@@ -5,6 +5,15 @@ import { alphaStats, cutoutEnabled, cutoutLocal } from '../cutout.mjs';
 
 const STRATEGIES = new Set(['auto', 'local', 'ai']);
 
+function requireModelCanCutOut(host, model) {
+  const { httpError, imageOptions } = host;
+  const options = imageOptions(model);
+  if (!model.capabilities.includes('edit_prompt')) throw httpError(400, 'model.noEditPrompt', '当前模型不支持提示词改图');
+  if (!options.transparent || !options.formats.includes('png')) {
+    throw httpError(400, 'backgroundRemoval.requiresTransparentModel', '当前图片模型不支持透明 PNG，请切换到已启用透明背景能力的图片模型');
+  }
+}
+
 function strategyOf(input) {
   const requested = String(input.strategy || '').trim().toLowerCase();
   if (STRATEGIES.has(requested)) return requested;
@@ -20,15 +29,10 @@ function create(host, input) {
   const requestedModelId = String(input.modelId || '').trim();
   const model = config.models.find((item) => item.id === (requestedModelId || config.active_model));
   if (!model || model.type === 'vision') throw httpError(400, 'model.imageRequired', '请选择有效的图片生成模型');
-  const options = imageOptions(model);
   // Local matting needs no prompt and no transparent output from the model, so
-  // it works with models that cannot return an alpha channel at all.
-  if (strategy !== 'local') {
-    if (!model.capabilities.includes('edit_prompt')) throw httpError(400, 'model.noEditPrompt', '当前模型不支持提示词改图');
-    if (!options.transparent || !options.formats.includes('png')) {
-      throw httpError(400, 'backgroundRemoval.requiresTransparentModel', '当前图片模型不支持透明 PNG，请切换到已启用透明背景能力的图片模型');
-    }
-  }
+  // it works with models that cannot return an alpha channel at all. Auto mode
+  // therefore checks the model only once it actually falls back to it.
+  if (strategy === 'ai') requireModelCanCutOut(host, model);
   // The vision model only plans what to keep; a pure local cut-out does not
   // need it. Auto tries the local matte first, so a missing vision model must
   // not block the request — it only matters once we fall back to the model.
@@ -45,7 +49,7 @@ function create(host, input) {
     inputImageId: image.id,
     parentVersionId: input.parentVersionId || image.version_id || null,
     params: { ...(input.params || {}), count: 1, outputFormat: 'png', transparent: true },
-  }, { visionModel, strategy, rect: input.rect || null, feather: input.feather || null });
+  }, { visionModel, strategy, modelId: model.id, rect: input.rect || null, feather: input.feather || null });
 }
 
 async function planWithVision(host, image, visionModel) {
@@ -105,6 +109,8 @@ async function prepare(host, image, state) {
     }
   }
   if (!visionModel) throw httpError(400, 'backgroundRemoval.requiresVisionModel', '改用模型抠图需要先配置视觉识别模型');
+  // Reaching this point means a model has to draw the cut-out after all.
+  requireModelCanCutOut(host, host.readModels().models.find((item) => item.id === state.modelId) || null);
   const plan = await planWithVision(host, image, visionModel);
   updateTask({ backgroundRemoval: { visionModelId: visionModel.id, strategy: 'ai', mattedBy: 'model', keepSubjects: plan.keepSubjects, discarded: plan.discarded, reason: plan.reason, confidence: plan.confidence } });
   return { image, prompt: plan.editPrompt };
@@ -142,7 +148,7 @@ export default {
   create, prepare, processOutput,
   taskInput: state => ({
     stage: 'planning',
-    backgroundRemoval: { strategy: state.strategy, ...(state.visionModel ? { visionModelId: state.visionModel.id } : {}) },
+    backgroundRemoval: { strategy: state.strategy, modelId: state.modelId, ...(state.visionModel ? { visionModelId: state.visionModel.id } : {}) },
   }),
   generationPhase: '去除背景并生成透明 PNG',
 };

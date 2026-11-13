@@ -49,6 +49,7 @@ node server.mjs      # stdio 传输
 | `local_edit` | 局部修改：在 `rect` 区域内按指令或参考图改写 |
 | `fusion_image` | 融合：把参考图按 `point` 位置融进主图 |
 | `extract_asset` | 提取主体：框选一块区域提取成独立素材（服务端自己裁剪） |
+| `remove_background` | 抠图：默认先本地抠（快、不耗额度），不合格再退回图片模型；`strategy` 可强制 `local`/`ai` |
 
 ## 尺寸怎么传
 
@@ -89,7 +90,7 @@ node server.mjs      # stdio 传输
 - 矩形一律用图片百分比：`{x, y, width, height}`，取值 0–100，左上角为原点。
 - 改字是两步：先 `recognize_text` 拿到分段，再 `edit_text` 只传要改的那几段（`original_text` + 新的 `text`），没变的段可以省略。
 - `extract_asset` 只需要 `rect`，裁剪与补边由 MCP 自己做（比例过于细长时会拉伸补边，避免平台比例校验失败）。
-- `remove_background` 没有暴露：当前模型 `transparentBackground: false`，插件必然报 `backgroundRemoval.requiresTransparentModel`。换到支持透明 PNG 的模型后再加。
+- `remove_background` 走三档策略：`auto`（默认，先本地抠、失败再让图片模型重画）、`local`（只用本地抠图，失败直接报错、不花额度）、`ai`（只用图片模型）。本地抠图由 `LAYERIVE_CUTOUT_URL` 指向的分割服务完成，保持原图尺寸与主体位置；图片里有多个主体时用 `rect` 指定只抠哪一个。本地路径不依赖模型的透明能力，所以当前模型也能用；只有 `ai` 策略才需要模型声明 `transparentBackground` 并支持 PNG。
 - 输出尺寸默认跟着**源图比例**走：MCP 会挑模型声明里最接近源图长宽比的那个尺寸再提交，和网页下拉一致。不这么做的话服务端会退回模型默认画布，把 16:9 的图输出成方形。
 
 ```text

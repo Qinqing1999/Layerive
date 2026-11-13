@@ -338,7 +338,7 @@ export const zhCN = {
   'ws.removeElementStagePlanning': '视觉模型正在识别圈选主体与删除意图…',
   'ws.removeElementStageGenerating': '图片模型正在删除目标并补全背景…',
   'ws.removeElementStagePreserving': '正在还原选区外原图并保存结果…',
-  'ws.removeBackgroundStagePlanning': '视觉模型正在判断应保留的主要人物或物体…',
+  'ws.removeBackgroundStagePlanning': '正在准备抠图，先看本地能否直接抠出主体…',
   'ws.removeBackgroundStageCutting': '正在本地抠出主体并生成透明背景…',
   'ws.removeBackgroundStageGenerating': '图片模型正在剔除背景并精细处理主体边缘…',
   'ws.removeBackgroundStageValidating': '正在校验透明通道并保存 PNG…',

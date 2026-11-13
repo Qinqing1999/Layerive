@@ -340,7 +340,7 @@ export const enUS: Record<TranslationKey, DictValue> = {
   'ws.removeElementStagePlanning': 'The vision model is identifying the selected subject and deletion intent…',
   'ws.removeElementStageGenerating': 'The image model is removing the target and rebuilding the background…',
   'ws.removeElementStagePreserving': 'Restoring the original pixels outside the selection and saving…',
-  'ws.removeBackgroundStagePlanning': 'The vision model is deciding which main people or objects to keep…',
+  'ws.removeBackgroundStagePlanning': 'Preparing the cut-out, starting with a local matte of the subject…',
   'ws.removeBackgroundStageCutting': 'Cutting the subject out locally to build a transparent background…',
   'ws.removeBackgroundStageGenerating': 'The image model is removing the background and refining subject edges…',
   'ws.removeBackgroundStageValidating': 'Validating the alpha channel and saving the PNG…',

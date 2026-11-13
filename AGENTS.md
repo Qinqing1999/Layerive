@@ -402,8 +402,8 @@ work/                       临时工作目录（被 Git 忽略）
 - 启动：`node mcp/server.mjs`（stdio 传输）；`LAYERIVE_URL` 指定后端，默认 `http://127.0.0.1:8788`。
 - 依赖独立安装（`cd mcp && npm install`），不参与前端构建，`mcp/node_modules` 被 Git 忽略。
 - 请求固定带 `Host: 127.0.0.1:<port>`：`assertLocalUiRequest` 要求回环 Host，MCP 进程在本机运行，因此既满足校验又不放宽它。
-- 工具（25 个）：`list_projects`、`create_project`、`project_status`、`list_models`、`key_pool_status`、`test_model`、`generate_image`、`task_status`、`upload_image`、`import_image`、`open_library_image`、`delete_library_image`、`list_library`、`list_images`、`size_options`，以及插件工具 `list_plugins`、`outpaint_image`、`enhance_image`、`remove_watermark`、`remove_element`、`edit_text`、`recognize_text`、`local_edit`、`fusion_image`、`extract_asset`。`import_image` 只把图片存进图片库，`open_library_image` 才打开成项目；`list_library` 列的是图片库，`list_images` 列的是单个项目。
-- 插件工具是服务端内置插件（`POST /api/projects/:id/plugins/:id/run`）的薄包装，网页与对话走同一套校验与后处理；矩形一律用 0–100 的图片百分比。`remove_background` 未暴露：当前模型 `transparentBackground: false`，插件必然报 `backgroundRemoval.requiresTransparentModel`。
+- 工具（26 个）：`list_projects`、`create_project`、`project_status`、`list_models`、`key_pool_status`、`test_model`、`generate_image`、`task_status`、`upload_image`、`import_image`、`open_library_image`、`delete_library_image`、`list_library`、`list_images`、`size_options`，以及插件工具 `list_plugins`、`outpaint_image`、`enhance_image`、`remove_watermark`、`remove_element`、`edit_text`、`recognize_text`、`local_edit`、`fusion_image`、`extract_asset`、`remove_background`。`import_image` 只把图片存进图片库，`open_library_image` 才打开成项目；`list_library` 列的是图片库，`list_images` 列的是单个项目。
+- 插件工具是服务端内置插件（`POST /api/projects/:id/plugins/:id/run`）的薄包装，网页与对话走同一套校验与后处理；矩形一律用 0–100 的图片百分比。`remove_background` 的 `strategy` 与网页一致（`auto` 先本地抠、失败退回模型；`local` 只本地；`ai` 只模型），只有 `ai` 才要求模型声明透明能力，所以当前模型也能抠图。
 - `producedImages()` 不能依赖 `task.versionId`（任务详情不返回该字段）：按任务 `finishedAt` 匹配版本 `createdAt`，无果时回退最新版本。
 - 插件工具默认按**源图比例**挑最近的声明尺寸（`sizeForEdit()` + `closestDeclaredSize()`）再提交：不传 `params.size` 时服务端会退回 `model.defaultParams.size`（固定画布），把 16:9 的图输出成方形；网页一直显式传这个尺寸，MCP 必须保持一致。`extract_asset` 用裁剪结果的尺寸。
 - `generate_image` 会等到任务落地才返回（默认 300 秒预算，`timeout_seconds` 可调）；超时返回仍可用的任务 ID，继续用 `task_status` 查。
