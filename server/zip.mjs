@@ -1,22 +1,30 @@
-import { inflateRawSync, deflateRawSync } from 'node:zlib';
+import { inflateRawSync, deflateRawSync, crc32 as nativeCrc32 } from 'node:zlib';
 
 export const MAX_ZIP_ENTRIES = 10000;
 export const MAX_ZIP_ENTRY_BYTES = 512 * 1024 * 1024;
 export const MAX_ZIP_TOTAL_BYTES = 2 * 1024 * 1024 * 1024;
 
-const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
-  let c = n;
-  for (let k = 0; k < 8; k += 1) c = (c & 1) ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
-  return c >>> 0;
-});
-
+// Prefer the native CRC-32 (Node >= 22.2, runs at memcpy speed); the JS table
+// is only a fallback for older runtimes. Both produce the same value.
 function crc32(buffer) {
+  if (typeof nativeCrc32 === 'function') return nativeCrc32(buffer) >>> 0;
+  const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k += 1) c = (c & 1) ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
   let crc = 0xffffffff;
   for (const byte of buffer) crc = CRC_TABLE[(crc ^ byte) & 0xff] ^ (crc >>> 8);
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-// Minimal zip writer (deflate). Entries: { name: string, data: Buffer }.
+// Already-compressed payloads (PNG/JPEG/WebP pictures, SQLite pages) shrink by
+// 0–1% under DEFLATE while burning CPU on every big export, so they are
+// written verbatim (method 0, STORE); everything else still deflates.
+const STORED_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif', '.db', '.db-wal', '.ico', '.mp4']);
+
+// Minimal zip writer. Entries: { name: string, data: Buffer }. Compressible
+// entries use deflate level 6, already-compressed ones are stored verbatim.
 // The UTF-8 flag (0x0800) is always set so Chinese entry names survive.
 export function createZip(entries) {
   if (!Array.isArray(entries) || entries.length > MAX_ZIP_ENTRIES) throw Object.assign(new Error('压缩包条目过多'), { status: 413 });
@@ -30,13 +38,16 @@ export function createZip(entries) {
     if (!name.length || name.length > 4096 || data.length > MAX_ZIP_ENTRY_BYTES) throw Object.assign(new Error('压缩包条目无效或过大'), { status: 413 });
     totalBytes += data.length;
     if (totalBytes > MAX_ZIP_TOTAL_BYTES) throw Object.assign(new Error('压缩包解压后过大'), { status: 413 });
-    const compressed = deflateRawSync(data, { level: 6 });
+    const fileName = name.toString('utf8');
+    const store = STORED_EXTENSIONS.has(fileName.slice(fileName.lastIndexOf('.')).toLowerCase());
+    const compressed = store ? data : deflateRawSync(data, { level: 6 });
+    const method = store ? 0 : 8;
     const crc = crc32(data);
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
     local.writeUInt16LE(0x0800, 6);
-    local.writeUInt16LE(8, 8);
+    local.writeUInt16LE(method, 8);
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(compressed.length, 18);
     local.writeUInt32LE(data.length, 22);
@@ -48,7 +59,7 @@ export function createZip(entries) {
     central.writeUInt16LE(20, 4);
     central.writeUInt16LE(20, 6);
     central.writeUInt16LE(0x0800, 8);
-    central.writeUInt16LE(8, 10);
+    central.writeUInt16LE(method, 10);
     central.writeUInt32LE(crc, 16);
     central.writeUInt32LE(compressed.length, 20);
     central.writeUInt32LE(entry.data.length, 24);

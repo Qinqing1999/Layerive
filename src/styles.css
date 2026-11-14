@@ -261,6 +261,8 @@ button:disabled, a.disabled { cursor: not-allowed; opacity: .48; pointer-events:
 .canvas-edit-menu .watermark-remove-launch:hover:not(:disabled) { background: #fff3e2; color: #9a570a; }
 .canvas-actions .download-version-zip { display: inline-flex; min-width: auto; gap: 3px; padding: 0 7px; border-color: #9bd4c9; background: #effaf7; color: #1e7469; font-weight: 750; }
 .canvas-actions .download-version-zip:hover { border-color: #55aa9d; background: #daf3ee; color: #145e56; }
+.canvas-actions .download-webp { min-width: auto; padding: 0 8px; border-color: #c9c4e8; background: #f3f1fc; color: #4f3f96; font-weight: 700; }
+.canvas-actions .download-webp:hover { border-color: #8577c9; background: #e6e2f7; color: #3a2d78; }
 .canvas-actions span { min-width: 42px; color: #727680; text-align: center; font-size: 10px; }
 .canvas-actions .zoom-label { min-width: 42px; border-color: transparent; background: transparent; color: #727680; }
 .canvas-edit-area { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
@@ -1467,6 +1469,8 @@ html[data-theme='dark'] .canvas-context strong { background: #262932; color: #d5
 html[data-theme='dark'] .canvas-actions button, html[data-theme='dark'] .canvas-actions a { background: #22252d; border-color: #32353f; color: #b3b8c2; }
 html[data-theme='dark'] .canvas-actions .download-version-zip { border-color: #2c574f; background: #182c28; color: #77cfc0; }
 html[data-theme='dark'] .canvas-actions .download-version-zip:hover { border-color: #3f7a6e; background: #214039; color: #a0e4d8; }
+html[data-theme='dark'] .canvas-actions .download-webp { border-color: #3a3554; background: #211f30; color: #a89fe0; }
+html[data-theme='dark'] .canvas-actions .download-webp:hover { border-color: #544c85; background: #2b2842; color: #c4bcf0; }
 html[data-theme='dark'] .canvas-edit-menu { border-color: #30343d; background: #20232a; box-shadow: 0 3px 10px #00000024; }
 html[data-theme='dark'] .canvas-edit-menu button { color: #c5c9d1; }
 html[data-theme='dark'] .canvas-edit-menu button + button::before { background: #343842; }

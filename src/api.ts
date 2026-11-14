@@ -171,3 +171,15 @@ export function canvasUrl(image: Pick<ProjectImage, 'url'>, width = 1600) {
 export function fullUrl(image: Pick<ProjectImage, 'url'>) {
   return image.url;
 }
+
+// A download that appends `?dl=<name>` asks the server for an attachment
+// response: the browser saves the bytes under `<name>` and no separate blob
+// round-trip is needed. `original` picks the stored bytes; `webp` picks the
+// cached canvas-width WebP copy, which for a several-megabyte PNG is often tens
+// of times smaller and what most people actually want when sharing a picture.
+export function downloadUrl(image: Pick<ProjectImage, 'url' | 'id' | 'width' | 'height'>, kind: 'original' | 'webp') {
+  const base = `layerive-${image.id.slice(0, 8)}${image.width ? `-${image.width}x${image.height}` : ''}`;
+  const name = kind === 'webp' ? `${base}.webp` : `${base}.png`;
+  const query = `dl=${encodeURIComponent(name)}`;
+  return kind === 'original' ? `${image.url}?${query}` : `${image.url}?w=1600&fmt=webp&${query}`;
+}

@@ -49,6 +49,8 @@ export const enUS: Record<TranslationKey, DictValue> = {
   'common.exit': 'Exit',
   'common.remove': 'Remove',
   'common.download': 'Download',
+  'common.downloadWebp': 'Compressed',
+  'common.downloadWebpTitle': 'Download the WebP copy (much smaller, best for sharing)',
 
   'home.navMain': 'Main navigation',
   'home.navProjects': 'Projects',

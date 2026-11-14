@@ -2795,7 +2795,7 @@ async function makeCachedVariant(source, cachePath, width, format) {
   }
 }
 
-function sendStatic(req, res, absolute, { immutable }) {
+function sendStatic(req, res, absolute, { immutable, download } = {}) {
   let stats;
   try {
     stats = statSync(absolute);
@@ -2811,6 +2811,16 @@ function sendStatic(req, res, absolute, { immutable }) {
     ETag: etag,
     'Last-Modified': lastModified,
   };
+  if (download) {
+    // `?dl=` marks the response as a file download and names it for the
+    // browser. The ASCII fallback keeps old clients happy; the RFC 5987
+    // parameter carries the real (possibly Chinese) name. A download is never
+    // a cache hit, so 304 handling is skipped entirely.
+    const ascii = download.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
+    headers['Content-Disposition'] = `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(download)}`;
+    res.writeHead(200, headers);
+    return createReadStream(absolute).pipe(res);
+  }
   const ifNoneMatch = req.headers['if-none-match'];
   const ifModifiedSince = req.headers['if-modified-since'];
   const fresh = ifNoneMatch
@@ -2837,8 +2847,13 @@ async function servePicture(req, res, pathname, searchParams, { prefix, root }) 
   const relative = decodeURIComponent(pathname.slice(prefix.length));
   const absolute = path.resolve(root, relative);
   if (!absolute.startsWith(root + path.sep) || !existsSync(absolute)) return json(res, 404, { error: '图片不存在' });
+  // `?dl=<name>` turns the response into a browser download instead of an
+  // inline image; the display variant (`w`/`fmt`) keeps its immutable caching
+  // untouched. A download that names a width uses that cached variant file.
+  const downloadName = searchParams.get('dl') || '';
   const width = Math.min(2048, Math.max(0, Number(searchParams.get('w')) || 0));
   const format = String(searchParams.get('fmt') || '').toLowerCase() === 'webp' ? 'webp' : 'png';
+  if (downloadName && width < 64 && format === 'png') return sendStatic(req, res, absolute, { immutable: true, download: downloadName });
   if (width < 64 && format === 'png') return sendStatic(req, res, absolute, { immutable: true });
   try {
     const stem = path.basename(absolute, path.extname(absolute));
@@ -2855,9 +2870,9 @@ async function servePicture(req, res, pathname, searchParams, { prefix, root }) 
         await makeCachedVariant(absolute, cachePath, width, format);
       }
     }
-    if (existsSync(cachePath)) return sendStatic(req, res, cachePath, { immutable: true });
+    if (existsSync(cachePath)) return sendStatic(req, res, cachePath, { immutable: true, download: downloadName || undefined });
   } catch { /* fall through to the original file */ }
-  return sendStatic(req, res, absolute, { immutable: true });
+  return sendStatic(req, res, absolute, { immutable: true, download: downloadName || undefined });
 }
 
 async function serveFile(req, res, pathname, searchParams) {

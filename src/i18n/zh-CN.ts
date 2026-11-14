@@ -47,6 +47,8 @@ export const zhCN = {
   'common.exit': '退出',
   'common.remove': '移除',
   'common.download': '下载',
+  'common.downloadWebp': '压缩版',
+  'common.downloadWebpTitle': '下载 WebP 压缩版（体积小得多，适合分享）',
 
   'home.navMain': '主导航',
   'home.navProjects': '项目',
